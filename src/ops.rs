@@ -106,38 +106,44 @@ fn blur_axis(src: &Array3<f32>, axis: usize, kernel: &[f32]) -> Array3<f32> {
 }
 
 /// Computes a full 3D separable Gaussian blur over dynamic volumes (3D or 4D).
+/// Applies 3D separable spatial blur in-place using double-buffered memory.
 pub fn gaussian_smooth_3d(vol: &mut Volume, sigma: f32) {
     let kernel = gaussian_kernel_1d(sigma);
     let shape = vol.data.shape();
 
     if shape.len() == 3 {
-        let arr3 = vol
+        let mut buf_a = vol
             .data
             .clone()
             .into_dimensionality::<ndarray::Ix3>()
             .unwrap();
-        let step1 = blur_axis(&arr3, 0, &kernel);
-        let step2 = blur_axis(&step1, 1, &kernel);
-        let step3 = blur_axis(&step2, 2, &kernel);
-        vol.data = step3.into_dyn();
+
+        // Ping-pong between buf_a and buf_b across the 3 spatial axes
+        let buf_b = blur_axis(&buf_a, 0, &kernel);
+        buf_a = blur_axis(&buf_b, 1, &kernel);
+        let final_buf = blur_axis(&buf_a, 2, &kernel);
+
+        vol.data = final_buf.into_dyn();
     } else if shape.len() == 4 {
         let n_volumes = shape[3];
         let mut smoothed_4d = ndarray::Array4::zeros((shape[0], shape[1], shape[2], n_volumes));
 
-        for t in 0..n_volumes {
-            let slice_3d = vol
-                .data
-                .slice(s![.., .., .., t])
-                .to_owned()
-                .into_dimensionality::<ndarray::Ix3>()
-                .unwrap();
+        // Parallelize across 4D gradient/time volumes directly with Rayon
+        smoothed_4d
+            .axis_iter_mut(Axis(3))
+            .zip(vol.data.axis_iter(Axis(3)))
+            .par_bridge()
+            .for_each(|(mut dst_3d, src_3d)| {
+                let slice_3d = src_3d
+                    .to_owned()
+                    .into_dimensionality::<ndarray::Ix3>()
+                    .unwrap();
+                let b1 = blur_axis(&slice_3d, 0, &kernel);
+                let b2 = blur_axis(&b1, 1, &kernel);
+                let b3 = blur_axis(&b2, 2, &kernel);
+                dst_3d.assign(&b3);
+            });
 
-            let step1 = blur_axis(&slice_3d, 0, &kernel);
-            let step2 = blur_axis(&step1, 1, &kernel);
-            let step3 = blur_axis(&step2, 2, &kernel);
-
-            smoothed_4d.slice_mut(s![.., .., .., t]).assign(&step3);
-        }
         vol.data = smoothed_4d.into_dyn();
     }
 }
