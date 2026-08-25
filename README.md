@@ -39,27 +39,73 @@ Compile an optimized release binary:
 
 ```cmd
 cargo build --release
+
+---
+
+Got you, David. Here’s a **clean, copy‑paste‑ready Markdown block**—no commentary, no extra fluff, just a perfectly formatted section you can drop straight into your README or any `.md` file.
+
+---
+
+```md
+## Build
+
+Compile an optimized release binary:
+
+```cmd
+cargo build --release
 ```
 
 ---
 
 ## Usage
 
-Usage: rust-mri-demo [OPTIONS] <ROOT>
+Run the pipeline using Cargo or the compiled binary.  
+All processing parameters have defaults and can be optionally configured.
 
-Arguments:
-  <ROOT>  Root folder containing NIfTI dataset to process recursively
-
-Options:
-  -a, --alpha <ALPHA>        Perfusion alpha scaling parameter [default: 0.01]
-  -s, --sigma-3d <SIGMA_3D>  Gaussian blur sigma for 3D structural volumes [default: 1.5]
-      --sigma-fa <SIGMA_FA>  Gaussian blur sigma for 4D FA maps [default: 1.0]
-  -b, --bvalue <BVALUE>      Diffusion b-value (s/mm²) for DTI tensor fitting [default: 1000]
-  -h, --help                 Print help information
-  -V, --version              Print version information
-
-Run the pipeline using Cargo or the compiled binary. All processing parameters have defaults and can be optionally configured.
+### Example (Windows)
 
 ```cmd
 cargo run --release -- "D:\ds004114" --bvalue 1000 --sigma-3d 1.5 --sigma-fa 1.0 -a 0.01
+```
 
+---
+
+## Command-Line Reference
+
+### Plaintext Usage
+
+```
+rust-mri-demo [OPTIONS] <ROOT>
+```
+
+### Arguments
+
+- **<ROOT>**  
+  Root folder containing NIfTI dataset to process recursively
+
+### Options
+
+- **-a, --alpha <ALPHA>**  
+  Perfusion alpha scaling parameter  
+  _default: 0.01_
+
+- **-s, --sigma-3d <SIGMA_3D>**  
+  Gaussian blur sigma for 3D structural volumes  
+  _default: 1.5_
+
+- **--sigma-fa <SIGMA_FA>**  
+  Gaussian blur sigma for 4D FA maps  
+  _default: 1.0_
+
+- **-b, --bvalue <BVALUE>**  
+  Diffusion b-value (s/mm²) for DTI tensor fitting  
+  _default: 1000_
+
+- **-h, --help**  
+  Print help information
+
+- **-V, --version**  
+  Print version information
+```
+
+---
