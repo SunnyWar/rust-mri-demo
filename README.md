@@ -39,3 +39,20 @@ Compile an optimized release binary:
 
 ```cmd
 cargo build --release
+```
+
+---
+
+## Usage
+
+Usage: rust-mri-demo [OPTIONS] <ROOT>
+
+Arguments:
+  <ROOT>  Root folder containing NIfTI dataset to process recursively
+
+Options:
+  -a, --alpha <ALPHA>  Perfusion alpha scaling parameter [default: 0.01]
+  -h, --help           Print help information
+  -V, --version        Print version information
+
+  ---
