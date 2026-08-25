@@ -59,11 +59,15 @@ $$\text{FA} = \sqrt{\frac{3}{2}} \frac{\sqrt{(\lambda_1 - \bar{\lambda})^2 + (\l
 
 ## Compile
 
+```cmd
 cargo build --release
+```
 
 ## Execution Example
 
+```cmd
 cargo run --release -- "D:\ds004114" --bvalue 1000 --sigma-3d 1.5 --sigma-fa 1.0
+```
 
 ## Command-Line Reference
 
