@@ -3,13 +3,8 @@ mod fit;
 mod metrics;
 mod types;
 
-pub use design::build_design_matrix;
-pub use fit::{TensorField, eigen_decompose, fit_tensor_field, fit_voxel_tensor, tensor_at};
-pub use metrics::{
-    axial_diffusivity, compute_scalar_map, fa_map, fractional_anisotropy, mean_diffusivity,
-    radial_diffusivity,
-};
-pub use types::{DtiError, TensorEigenDecomp};
+pub use fit::fit_tensor_field;
+pub use metrics::fa_map;
 
 use ndarray::{Array3, Array4};
 

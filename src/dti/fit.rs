@@ -82,10 +82,10 @@ pub fn fit_tensor_field(
             found: gradients.len(),
         });
     }
-    if let Some(m) = mask {
-        if m.shape() != [nx, ny, nz] {
-            return Err(DtiError::MaskShapeMismatch);
-        }
+    if let Some(m) = mask
+        && m.shape() != [nx, ny, nz]
+    {
+        return Err(DtiError::MaskShapeMismatch);
     }
 
     let design = build_design_matrix(gradients, bvalue);
@@ -95,10 +95,10 @@ pub fn fit_tensor_field(
     for x in 0..nx {
         for y in 0..ny {
             for z in 0..nz {
-                if let Some(m) = mask {
-                    if m[[x, y, z]] <= 0.0 {
-                        continue;
-                    }
+                if let Some(m) = mask
+                    && m[[x, y, z]] <= 0.0
+                {
+                    continue;
                 }
 
                 for i in 0..n_dirs {
