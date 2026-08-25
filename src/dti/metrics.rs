@@ -66,12 +66,6 @@ pub fn compute_scalar_map(
     out
 }
 
-/// Convenience wrapper matching the original `compute_dti_fa_wlls` output
-/// shape, now built on top of the reusable tensor field / metric machinery.
-pub fn fa_map(field: &TensorField) -> Array3<f32> {
-    compute_scalar_map(field, fractional_anisotropy)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

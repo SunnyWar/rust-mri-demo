@@ -1,12 +1,17 @@
 mod dti;
 mod imaging;
 
-use crate::dti::compute_dti_fa_wlls;
+use crate::dti::axial_diffusivity;
+use crate::dti::fractional_anisotropy;
+use crate::dti::mean_diffusivity;
+use crate::dti::radial_diffusivity;
+use crate::dti::{compute_scalar_map, fit_tensor_field};
 use crate::imaging::mask::generate_otsu_mask;
 use crate::imaging::nifti::Volume;
 use crate::imaging::nifti::{load_nifti, save_nifti};
 use crate::imaging::smooth::gaussian_smooth_3d_anisotropic;
 use clap::Parser;
+use nifti::NiftiHeader;
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,20 +21,28 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Root folder containing BIDS dataset
     root: String,
 
-    /// Gaussian blur sigma (mm) for 3D structural volumes
     #[arg(short = 's', long = "sigma-3d", default_value_t = 1.5)]
     sigma_3d: f32,
 
-    /// Gaussian blur sigma (mm) for 4D FA maps
     #[arg(long = "sigma-fa", default_value_t = 1.0)]
     sigma_fa: f32,
 
-    /// Diffusion b-value (s/mm^2) for DTI tensor fitting
     #[arg(short, long, default_value_t = 1000.0)]
     bvalue: f32,
+
+    /// Also output a mean diffusivity map
+    #[arg(long)]
+    emit_md: bool,
+
+    /// Also output an axial diffusivity map
+    #[arg(long)]
+    emit_ad: bool,
+
+    /// Also output a radial diffusivity map
+    #[arg(long)]
+    emit_rd: bool,
 }
 
 fn find_nii_gz_files(root: &Path) -> Vec<PathBuf> {
@@ -120,8 +133,6 @@ fn process_file(file: &Path, args: &Cli) {
     let vol = load_nifti(file_str);
     let shape = vol.data.shape().to_vec();
 
-    // Extract physical voxel dimensions (dx, dy, dz in mm) from header pixdim
-    // Defaults to 1.0mm isotropic if header metadata is unpopulated
     let pixdim = vol.header.pixdim;
     let zooms = [
         if pixdim[1] > 0.0 { pixdim[1] } else { 1.0 },
@@ -129,56 +140,55 @@ fn process_file(file: &Path, args: &Cli) {
         if pixdim[3] > 0.0 { pixdim[3] } else { 1.0 },
     ];
 
-    let (processed_data, output_suffix) = if shape.len() == 4 {
-        // Convert dynamic array to 4D for DTI analysis
+    if shape.len() == 4 {
         let dwi = vol
             .data
             .into_dimensionality::<ndarray::Ix4>()
             .expect("Expected 4D array shape for DWI dataset");
 
-        // Stage 1: Generate Otsu brain mask from b0 volume (index 0)
         let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
         let mask = generate_otsu_mask(&b0, 256);
-
-        // Stage 2: Fit DTI tensor using Weighted Linear Least Squares (WLLS)
         let gradients = load_gradients(file, shape[3]);
-        let mut fa_map = compute_dti_fa_wlls(&dwi, &gradients, args.bvalue, Some(&mask));
 
-        // Stage 3: Anisotropic spatial Gaussian smoothing accounting for voxel zooms
+        let field = fit_tensor_field(&dwi, &gradients, args.bvalue, Some(&mask))
+            .expect("DTI tensor fit failed");
+
+        let mut fa_map = compute_scalar_map(&field, fractional_anisotropy);
         gaussian_smooth_3d_anisotropic(&mut fa_map, args.sigma_fa, zooms);
+        save_scalar_map(&fa_map, file, "fa_processed", &vol.header);
 
-        (fa_map.into_dyn(), "fa_processed")
+        if args.emit_md {
+            let mut md_map = compute_scalar_map(&field, mean_diffusivity);
+            gaussian_smooth_3d_anisotropic(&mut md_map, args.sigma_fa, zooms);
+            save_scalar_map(&md_map, file, "md_processed", &vol.header);
+        }
+        if args.emit_ad {
+            let mut ad_map = compute_scalar_map(&field, axial_diffusivity);
+            gaussian_smooth_3d_anisotropic(&mut ad_map, args.sigma_fa, zooms);
+            save_scalar_map(&ad_map, file, "ad_processed", &vol.header);
+        }
+        if args.emit_rd {
+            let mut rd_map = compute_scalar_map(&field, radial_diffusivity);
+            gaussian_smooth_3d_anisotropic(&mut rd_map, args.sigma_fa, zooms);
+            save_scalar_map(&rd_map, file, "rd_processed", &vol.header);
+        }
     } else {
-        // Convert dynamic array to 3D for structural volume
         let mut struct_vol = vol
             .data
             .into_dimensionality::<ndarray::Ix3>()
             .expect("Expected 3D array shape for structural dataset");
 
-        // Stage 1: Generate Otsu brain mask
         let mask = generate_otsu_mask(&struct_vol, 256);
-
-        // Stage 2: Anisotropic spatial smoothing
         gaussian_smooth_3d_anisotropic(&mut struct_vol, args.sigma_3d, zooms);
 
-        // Stage 3: Mask background voxels out of final volume
         struct_vol.zip_mut_with(&mask, |val, &m| {
             if m == 0.0 {
                 *val = 0.0;
             }
         });
 
-        (struct_vol.into_dyn(), "smoothed_processed")
-    };
-
-    // Construct updated volume structure for export
-    let output_vol = Volume {
-        data: processed_data,
-        header: vol.header,
-    };
-
-    let output_path = get_processed_output_path(file, output_suffix);
-    save_nifti(&output_vol, output_path.to_str().unwrap());
+        save_scalar_map(&struct_vol, file, "smoothed_processed", &vol.header);
+    }
 
     let elapsed = start.elapsed();
     println!(
@@ -186,6 +196,20 @@ fn process_file(file: &Path, args: &Cli) {
         file.file_name().unwrap().to_string_lossy(),
         elapsed.as_secs_f32()
     );
+}
+
+fn save_scalar_map(
+    map: &ndarray::Array3<f32>,
+    source_file: &Path,
+    suffix: &str,
+    header: &NiftiHeader,
+) {
+    let output_vol = Volume {
+        data: map.clone().into_dyn(),
+        header: header.clone(),
+    };
+    let output_path = get_processed_output_path(source_file, suffix);
+    save_nifti(&output_vol, output_path.to_str().unwrap());
 }
 
 fn main() {
