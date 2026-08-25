@@ -11,13 +11,14 @@ Designed as a modern alternative to traditional MATLAB/SPM processing scripts, t
 - **Automated Dataset Traversal:** Recursively discovers NIfTI files (`.nii.gz`) across nested BIDS structures without hardcoded directory assumptions.
 - **Dynamic Dimensionality Support:** Automatically detects 3D structural volumes (T1w) and 4D time-series/diffusion datasets (DWI).
 - **Stage 1: Diffusion Tensor Imaging (DTI):** 
-  - Fits a 3x3 symmetric Diffusion Tensor per voxel via least-squares pseudoinverse solver.
+  - Fits a $3 \times 3$ symmetric Diffusion Tensor per voxel via least-squares pseudoinverse solver using a configurable $b$-value (`--bvalue`).
   - Computes Fractional Anisotropy (FA) scalar maps from tensor eigenvalues ($\lambda_1, \lambda_2, \lambda_3$).
   - Parses adjacent `.bvec` gradient files when available (falls back to synthetic gradient orientations if unmapped).
 - **Stage 2: 3D Parallel Spatial Smoothing:** 
-  - Applies a 3D separable Gaussian spatial filter ($3\times1\text{D}$ convolutions across spatial axes) parallelized via Rayon thread pooling.
+  - Applies a 3D separable Gaussian spatial filter ($3 \times 1\text{D}$ convolutions across spatial axes) parallelized via Rayon thread pooling.
+  - Accepts independent smoothing kernels for 3D volumes (`--sigma-3d`) and 4D FA maps (`--sigma-fa`).
 - **Stage 3: Non-Linear Perfusion Scaling:** 
-  - Performs high-throughput element-wise signal transformations ($v \cdot e^{-\alpha v}$) in-place.
+  - Performs high-throughput element-wise signal transformations ($v \cdot e^{-\alpha v}$) in-place using a customizable scaling factor (`--alpha`).
 
 ---
 
@@ -40,22 +41,7 @@ Compile an optimized release binary:
 ```cmd
 cargo build --release
 
----
-
-Got you, David. Here’s a **clean, copy‑paste‑ready Markdown block**—no commentary, no extra fluff, just a perfectly formatted section you can drop straight into your README or any `.md` file.
-
----
-
-```md
-## Build
-
-Compile an optimized release binary:
-
-```cmd
-cargo build --release
 ```
-
----
 
 ## Usage
 
@@ -101,11 +87,6 @@ rust-mri-demo [OPTIONS] <ROOT>
   Diffusion b-value (s/mm²) for DTI tensor fitting  
   _default: 1000_
 
-- **-h, --help**  
-  Print help information
 
-- **-V, --version**  
-  Print version information
-```
 
 ---
