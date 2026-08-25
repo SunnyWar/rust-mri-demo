@@ -1,6 +1,11 @@
+mod dti;
 mod imaging;
-mod ops;
 
+use crate::dti::compute_dti_fa_wlls;
+use crate::imaging::mask::generate_otsu_mask;
+use crate::imaging::nifti::Volume;
+use crate::imaging::nifti::{load_nifti, save_nifti};
+use crate::imaging::smooth::gaussian_smooth_3d_anisotropic;
 use clap::Parser;
 use rayon::prelude::*;
 use std::fs;
@@ -112,7 +117,7 @@ fn process_file(file: &Path, args: &Cli) {
     let start = Instant::now();
     let file_str = file.to_str().unwrap();
 
-    let vol = imaging::load_nifti(file_str);
+    let vol = load_nifti(file_str);
     let shape = vol.data.shape().to_vec();
 
     // Extract physical voxel dimensions (dx, dy, dz in mm) from header pixdim
@@ -133,14 +138,14 @@ fn process_file(file: &Path, args: &Cli) {
 
         // Stage 1: Generate Otsu brain mask from b0 volume (index 0)
         let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
-        let mask = ops::generate_otsu_mask(&b0, 256);
+        let mask = generate_otsu_mask(&b0, 256);
 
         // Stage 2: Fit DTI tensor using Weighted Linear Least Squares (WLLS)
         let gradients = load_gradients(file, shape[3]);
-        let mut fa_map = ops::compute_dti_fa_wlls(&dwi, &gradients, args.bvalue, Some(&mask));
+        let mut fa_map = compute_dti_fa_wlls(&dwi, &gradients, args.bvalue, Some(&mask));
 
         // Stage 3: Anisotropic spatial Gaussian smoothing accounting for voxel zooms
-        ops::gaussian_smooth_3d_anisotropic(&mut fa_map, args.sigma_fa, zooms);
+        gaussian_smooth_3d_anisotropic(&mut fa_map, args.sigma_fa, zooms);
 
         (fa_map.into_dyn(), "fa_processed")
     } else {
@@ -151,10 +156,10 @@ fn process_file(file: &Path, args: &Cli) {
             .expect("Expected 3D array shape for structural dataset");
 
         // Stage 1: Generate Otsu brain mask
-        let mask = ops::generate_otsu_mask(&struct_vol, 256);
+        let mask = generate_otsu_mask(&struct_vol, 256);
 
         // Stage 2: Anisotropic spatial smoothing
-        ops::gaussian_smooth_3d_anisotropic(&mut struct_vol, args.sigma_3d, zooms);
+        gaussian_smooth_3d_anisotropic(&mut struct_vol, args.sigma_3d, zooms);
 
         // Stage 3: Mask background voxels out of final volume
         struct_vol.zip_mut_with(&mask, |val, &m| {
@@ -167,13 +172,13 @@ fn process_file(file: &Path, args: &Cli) {
     };
 
     // Construct updated volume structure for export
-    let output_vol = imaging::Volume {
+    let output_vol = Volume {
         data: processed_data,
         header: vol.header,
     };
 
     let output_path = get_processed_output_path(file, output_suffix);
-    imaging::save_nifti(&output_vol, output_path.to_str().unwrap());
+    save_nifti(&output_vol, output_path.to_str().unwrap());
 
     let elapsed = start.elapsed();
     println!(
