@@ -1,6 +1,5 @@
 use crate::imaging::Volume;
 use nalgebra::Matrix3;
-use ndarray::s;
 use ndarray::{Array3, Axis};
 use rayon::prelude::*;
 use std::f32::consts::PI;

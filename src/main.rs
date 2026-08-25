@@ -2,8 +2,10 @@ mod imaging;
 mod ops;
 
 use clap::Parser;
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -110,66 +112,62 @@ fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
     file.with_file_name(format!("{}_{}.nii.gz", stem, suffix))
 }
 
+fn process_file(file: &Path, args: &Cli) {
+    let start = Instant::now();
+    let file_str = file.to_str().unwrap();
+
+    let mut vol = imaging::load_nifti(file_str);
+    let shape = vol.data.shape().to_vec();
+
+    let output_path = if shape.len() == 4 {
+        let gradients = load_gradients(file, shape[3]);
+        let mut fa_vol = ops::compute_dti_fa(&vol, &gradients, args.bvalue);
+
+        ops::gaussian_smooth_3d(&mut fa_vol, args.sigma_fa);
+        ops::perfusion_transform(&mut fa_vol, args.alpha);
+        vol = fa_vol;
+
+        get_processed_output_path(file, "fa_processed")
+    } else {
+        ops::gaussian_smooth_3d(&mut vol, args.sigma_3d);
+        ops::perfusion_transform(&mut vol, args.alpha);
+
+        get_processed_output_path(file, "smoothed_processed")
+    };
+
+    imaging::save_nifti(&vol, output_path.to_str().unwrap());
+
+    let elapsed = start.elapsed();
+    println!(
+        "Processed: {} ({:.3}s)",
+        file.file_name().unwrap().to_string_lossy(),
+        elapsed.as_secs_f32()
+    );
+}
+
 fn main() {
     let args = Cli::parse();
     let root = Path::new(&args.root);
     let all_start = Instant::now();
 
     let files = find_nii_gz_files(root);
-    let mut files_processed = 0;
+    let files_processed = AtomicUsize::new(0);
 
     println!("Found {} NIfTI files", files.len());
-    println!("Processing with alpha = {}", args.alpha);
+    println!("Processing dataset in parallel with Rayon...");
 
-    for file in files {
-        println!("----------------------------------------");
-        println!("Processing: {}", file.display());
-
-        let start = Instant::now();
-        let file_str = file.to_str().unwrap();
-
-        let mut vol = imaging::load_nifti(file_str);
-        let shape = vol.data.shape().to_vec();
-
-        let output_path = if shape.len() == 4 {
-            println!("Detected 4D DWI volume ({} gradient steps)", shape[3]);
-
-            // Stage 1: Compute FA map using user-specified b-value
-            let gradients = load_gradients(&file, shape[3]);
-            let mut fa_vol = ops::compute_dti_fa(&vol, &gradients, args.bvalue);
-
-            // Stage 2: Apply spatial smoothing using user-specified FA sigma
-            ops::gaussian_smooth_3d(&mut fa_vol, args.sigma_fa);
-
-            // Stage 3: Apply non-linear perfusion transform
-            ops::perfusion_transform(&mut fa_vol, args.alpha);
-            vol = fa_vol;
-
-            get_processed_output_path(&file, "fa_processed")
-        } else {
-            println!(
-                "Detected 3D volume (spatial shape: {}x{}x{})",
-                shape[0], shape[1], shape[2]
-            );
-
-            // Stage 1: Spatial Gaussian Blur using user-specified 3D sigma
-            ops::gaussian_smooth_3d(&mut vol, args.sigma_3d);
-
-            // Stage 2: Intensity Transform
-            ops::perfusion_transform(&mut vol, args.alpha);
-
-            get_processed_output_path(&file, "smoothed_processed")
-        };
-
-        imaging::save_nifti(&vol, output_path.to_str().unwrap());
-        files_processed += 1;
-
-        let elapsed = start.elapsed();
-        println!("Completed in {:.3} seconds", elapsed.as_secs_f32());
-    }
+    // Parallelize pipeline across files concurrently
+    files.par_iter().for_each(|file| {
+        process_file(file, &args);
+        files_processed.fetch_add(1, Ordering::Relaxed);
+    });
 
     let all_elapsed = all_start.elapsed();
-    println!("Files processed: {}", files_processed);
+    println!("----------------------------------------");
+    println!(
+        "Files processed: {}",
+        files_processed.load(Ordering::Relaxed)
+    );
     println!(
         "All processing completed in {:.3} seconds",
         all_elapsed.as_secs_f32()
