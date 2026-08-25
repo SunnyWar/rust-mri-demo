@@ -34,7 +34,7 @@ fn find_nii_gz_files(root: &Path) -> Vec<PathBuf> {
             files.extend(find_nii_gz_files(&path));
         } else {
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
-            
+
             // Match .nii.gz files, but ignore previously generated outputs
             if filename.ends_with(".nii.gz") && !filename.contains("_processed") {
                 files.push(path);
@@ -84,7 +84,7 @@ fn load_gradients(nifti_path: &Path, n_dirs: usize) -> Vec<[f32; 3]> {
 
 fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
     let filename = file.file_name().unwrap().to_string_lossy();
-    
+
     // Strip trailing .nii.gz or .nii
     let stem = if filename.ends_with(".nii.gz") {
         &filename[..filename.len() - 7]
@@ -100,8 +100,10 @@ fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
 fn main() {
     let args = Cli::parse();
     let root = Path::new(&args.root);
+    let all_start = Instant::now();
 
     let files = find_nii_gz_files(root);
+    let mut files_processed = 0;
 
     println!("Found {} NIfTI files", files.len());
     println!("Processing with alpha = {}", args.alpha);
@@ -149,8 +151,16 @@ fn main() {
         };
 
         imaging::save_nifti(&vol, output_path.to_str().unwrap());
+        files_processed += 1;
 
         let elapsed = start.elapsed();
         println!("Completed in {:.3} seconds", elapsed.as_secs_f32());
     }
+
+    let all_elapsed = all_start.elapsed();
+    println!("Files processed: {}", files_processed);
+    println!(
+        "All processing completed in {:.3} seconds",
+        all_elapsed.as_secs_f32()
+    );
 }
