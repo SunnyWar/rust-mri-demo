@@ -7,13 +7,26 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Parser)]
+#[command(author, version, about, long_about = None)]
 struct Cli {
     /// Root folder containing BIDS dataset
     root: String,
 
-    /// Perfusion alpha parameter
+    /// Perfusion alpha scaling factor
     #[arg(short, long, default_value_t = 0.01)]
     alpha: f32,
+
+    /// Gaussian blur sigma (mm) for 3D structural volumes
+    #[arg(short = 's', long = "sigma-3d", default_value_t = 1.5)]
+    sigma_3d: f32,
+
+    /// Gaussian blur sigma (mm) for 4D FA maps
+    #[arg(long = "sigma-fa", default_value_t = 1.0)]
+    sigma_fa: f32,
+
+    /// Diffusion b-value (s/mm^2) for DTI tensor fitting
+    #[arg(short, long, default_value_t = 1000.0)]
+    bvalue: f32,
 }
 
 fn find_nii_gz_files(root: &Path) -> Vec<PathBuf> {
@@ -121,18 +134,17 @@ fn main() {
         let output_path = if shape.len() == 4 {
             println!("Detected 4D DWI volume ({} gradient steps)", shape[3]);
 
-            // Stage 1: Compute Fractional Anisotropy tensor map
+            // Stage 1: Compute FA map using user-specified b-value
             let gradients = load_gradients(&file, shape[3]);
-            let mut fa_vol = ops::compute_dti_fa(&vol, &gradients, 1000.0);
+            let mut fa_vol = ops::compute_dti_fa(&vol, &gradients, args.bvalue);
 
-            // Stage 2: Apply spatial smoothing to remove noise in the FA map
-            ops::gaussian_smooth_3d(&mut fa_vol, 1.0);
+            // Stage 2: Apply spatial smoothing using user-specified FA sigma
+            ops::gaussian_smooth_3d(&mut fa_vol, args.sigma_fa);
 
             // Stage 3: Apply non-linear perfusion transform
             ops::perfusion_transform(&mut fa_vol, args.alpha);
             vol = fa_vol;
 
-            // Use the helper here:
             get_processed_output_path(&file, "fa_processed")
         } else {
             println!(
@@ -140,13 +152,12 @@ fn main() {
                 shape[0], shape[1], shape[2]
             );
 
-            // Stage 1: Spatial Gaussian Blur
-            ops::gaussian_smooth_3d(&mut vol, 1.5);
+            // Stage 1: Spatial Gaussian Blur using user-specified 3D sigma
+            ops::gaussian_smooth_3d(&mut vol, args.sigma_3d);
 
             // Stage 2: Intensity Transform
             ops::perfusion_transform(&mut vol, args.alpha);
 
-            // Use the helper here:
             get_processed_output_path(&file, "smoothed_processed")
         };
 
