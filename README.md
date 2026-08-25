@@ -1,122 +1,88 @@
-# Rust MRI Processing Demo (`rust-mri-demo`)
+# Rust Neuroimaging Pipeline (`rust-mri-demo`)
 
-A high-performance, multi-threaded command-line tool written in Rust for batch processing 3D and 4D NIfTI neuroimaging datasets (`.nii.gz`).
+A high-throughput, multi-threaded command-line engine written in Rust for processing 3D structural and 4D Diffusion Tensor Imaging (DTI) datasets in BIDS format (`.nii.gz`).
 
-Designed as a modern alternative to traditional MATLAB/SPM processing scripts, this tool leverages shared-memory thread parallelism (`rayon`) and explicit memory alignment (`ndarray`, `nalgebra`) to achieve significant speedups across large BIDS datasets.
+Built as a high-performance compute backend for neuroimaging research, this pipeline leverages shared-memory thread parallelism (`rayon`), SIMD-accelerated array transformations (`ndarray`), and rigid linear algebra solvers (`nalgebra`).
+
+---
+
+## Key Algorithmic Stages
+
+1. **BIDS Dataset Traversal:** Recursively resolves NIfTI structures across arbitrary subject/session directories without hardcoded paths.
+2. **Otsu Brain Masking:** Performs global 256-bin Otsu thresholding to segment intracranial volume from background noise and skull space.
+3. **WLLS DTI Tensor Fitting:** 
+   - Fits a $3 \times 3$ symmetric diffusion tensor per voxel using Weighted Linear Least Squares (WLLS) with $W = \text{diag}(S^2)$ variance weighting.
+   - Computes Fractional Anisotropy (FA) scalar maps derived from tensor eigenvalues ($\lambda_1, \lambda_2, \lambda_3$).
+   - Automatically parses associated `.bvec` direction matrices.
+4. **Physical Anisotropic Gaussian Smoothing:**
+   - Reads spatial voxel dimensions ($dx, dy, dz$ in mm) from NIfTI header `pixdim` affine metadata.
+   - Computes separable 1D Gaussian kernel sigmas in physical space ($\sigma_{\text{vox}} = \sigma_{\text{mm}} / \text{zoom}$) to prevent spatial blur distortions across anisotropic slice geometries.
+
+---
+
+## Performance & Cohort Benchmarks
+
+`rust-mri-demo` achieves real-time cohort throughput by avoiding redundant heap allocations, utilizing memory-mapped stream handles, and leveraging parallel Rayon thread pooling across volume batches.
+
+### Cohort Benchmark Results
+
+| Metric | Measurement |
+| :--- | :--- |
+| **Dataset Size** | 140 NIfTI volumes (3D T1w / 4D DWI) |
+| **Total Wall Clock Time** | **17.503 seconds** |
+| **Average Per-Volume Latency** | **~125 ms / volume** |
+| **Throughput** | **~8.00 volumes / sec** |
+
+*Benchmarked across 140 subject files including I/O, Otsu masking, WLLS tensor fitting, anisotropic smoothing, and Gzip compression.*
 
 ---
 
 ## Scientific Assumptions & Pipeline Positioning
 
-> **Note on Pipeline Context:** `rust-mri-demo` is designed as a ultra-fast compute engine for **BIDS derivatives**. It assumes input NIfTI volumes have undergone baseline motion correction, eddy current correction, and skull stripping via standard front-end tooling (e.g., fMRIPrep, QSIPrep).
+> **Note on Pipeline Context:** `rust-mri-demo` is designed as a high-throughput compute engine for **BIDS derivatives**. It assumes input NIfTI volumes have undergone baseline motion and eddy current correction via upstream pipelines (e.g., QSIPrep, fMRIPrep).
 
-### Microstructural & Signal Models
-1. **Diffusion Tensor Imaging (DTI):** Monocompartment tensor fit using weighted linear least-squares (WLLS) on log-attenuated signals:
-   $$\mathbf{S}(b) = S_0 \cdot e^{-b \cdot \mathbf{g}^T \mathbf{D} \mathbf{g}}$$
-   Fractional Anisotropy (FA) is derived directly from the primary eigenvalues ($\lambda_1, \lambda_2, \lambda_3$) of $\mathbf{D}$.
-2. **Spatial Anisotropy Handling:** Gaussian smoothing scales spatial variance $\sigma$ against the voxel dimensions ($dx, dy, dz$) extracted directly from the NIfTI header affine matrix.
+### Microstructural Model
+Monocompartment tensor fit using weighted linear least-squares (WLLS) on log-attenuated signals:
 
----
+$$\mathbf{S}(b) = S_0 \cdot e^{-b \cdot \mathbf{g}^T \mathbf{D} \mathbf{g}}$$
 
-## Performance & Benchmarks
+Fractional Anisotropy (FA) is derived directly from the tensor eigenvalues:
 
-`rust-mri-demo` achieves real-time cohort throughput by leveraging Rayon shared-memory thread parallelism, zero-cost abstractions, and SIMD-accelerated array transformations.
-
-### Cohort Processing Benchmark
-
-- **Dataset Size:** 140 NIfTI volumes (3D structural & 4D DWI series)
-- **Operations:** Dataset traversal, DTI tensor fitting & FA map extraction, 3D separable Gaussian smoothing, signal scaling, and compressed `.nii.gz` I/O.
-
-| Metric | Measured Value |
-| :--- | :--- |
-| **Total Files Processed** | **140 files** |
-| **Total Pipeline Wall Time** | **23.870 seconds** |
-| **Average Latency / Volume** | **~170 ms** |
-| **Throughput** | **~5.86 volumes / sec** |
-
-*Benchmarked on local workstation hardware.*
-
-## Features
-
-- **Automated Dataset Traversal:** Recursively discovers NIfTI files (`.nii.gz`) across nested BIDS structures without hardcoded directory assumptions.
-- **Dynamic Dimensionality Support:** Automatically detects 3D structural volumes (T1w) and 4D time-series/diffusion datasets (DWI).
-- **Stage 1: Diffusion Tensor Imaging (DTI):** 
-  - Fits a $3 \times 3$ symmetric Diffusion Tensor per voxel via least-squares pseudoinverse solver using a configurable $b$-value (`--bvalue`).
-  - Computes Fractional Anisotropy (FA) scalar maps from tensor eigenvalues ($\lambda_1, \lambda_2, \lambda_3$).
-  - Parses adjacent `.bvec` gradient files when available (falls back to synthetic gradient orientations if unmapped).
-- **Stage 2: 3D Parallel Spatial Smoothing:** 
-  - Applies a 3D separable Gaussian spatial filter ($3 \times 1\text{D}$ convolutions across spatial axes) parallelized via Rayon thread pooling.
-  - Accepts independent smoothing kernels for 3D volumes (`--sigma-3d`) and 4D FA maps (`--sigma-fa`).
-- **Stage 3: Non-Linear Perfusion Scaling:** 
-  - Performs high-throughput element-wise signal transformations ($v \cdot e^{-\alpha v}$) in-place using a customizable scaling factor (`--alpha`).
+$$\text{FA} = \sqrt{\frac{3}{2}} \frac{\sqrt{(\lambda_1 - \bar{\lambda})^2 + (\lambda_2 - \bar{\lambda})^2 + (\lambda_3 - \bar{\lambda})^2}}{\sqrt{\lambda_1^2 + \lambda_2^2 + \lambda_3^2}}$$
 
 ---
 
-## Prerequisites
+## Build & Usage
 
-- [Rust Toolchain](https://www.rust-lang.org/tools/install) (1.75+ recommended)
-- Crate dependencies (`Cargo.toml`):
-  - `nifti` (0.17)
-  - `ndarray` (0.16 with `rayon` feature)
-  - `rayon`
-  - `nalgebra`
-  - `clap`
+### Prerequisites
+- [Rust Toolchain](https://www.rust-lang.org/tools/install) (1.75+)
 
----
+## Compile
 
-## Build
-
-Compile an optimized release binary:
-
-```cmd
 cargo build --release
 
-```
+## Execution Example
 
-## Usage
-
-Run the pipeline using Cargo or the compiled binary.  
-All processing parameters have defaults and can be optionally configured.
-
-### Example (Windows)
-
-```cmd
-cargo run --release -- "D:\ds004114" --bvalue 1000 --sigma-3d 1.5 --sigma-fa 1.0 -a 0.01
-```
-
----
+cargo run --release -- "D:\ds004114" --bvalue 1000 --sigma-3d 1.5 --sigma-fa 1.0
 
 ## Command-Line Reference
 
-### Plaintext Usage
-
-```
 rust-mri-demo [OPTIONS] <ROOT>
-```
 
 ### Arguments
 
-- **<ROOT>**  
-  Root folder containing NIfTI dataset to process recursively
+- <ROOT> — Root folder containing BIDS NIfTI dataset to process recursively.
 
 ### Options
 
-- **-a, --alpha <ALPHA>**  
-  Perfusion alpha scaling parameter  
-  _default: 0.01_
+- -s, --sigma-3d <SIGMA_3D>
+  Smoothing kernel σ (mm) for 3D structural volumes
+  default: 1.5
 
-- **-s, --sigma-3d <SIGMA_3D>**  
-  Gaussian blur sigma for 3D structural volumes  
-  _default: 1.5_
+- --sigma-fa <SIGMA_FA>
+  Smoothing kernel σ (mm) for 4D FA maps
+  default: 1.0
 
-- **--sigma-fa <SIGMA_FA>**  
-  Gaussian blur sigma for 4D FA maps  
-  _default: 1.0_
-
-- **-b, --bvalue <BVALUE>**  
-  Diffusion b-value (s/mm²) for DTI tensor fitting  
-  _default: 1000_
-
-
-
----
+- -b, --bvalue <BVALUE>
+  Diffusion b-value (s/mm²) for DTI tensor fitting
+  default: 1000

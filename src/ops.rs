@@ -1,238 +1,280 @@
-use crate::imaging::Volume;
-use nalgebra::Matrix3;
-use ndarray::{Array3, Axis};
-use rayon::prelude::*;
-use std::f32::consts::PI;
+use nalgebra::{DMatrix, DVector, SMatrix};
+use ndarray::Array3;
+use ndarray::Array4;
 
-pub fn perfusion_transform(vol: &mut Volume, alpha: f32) {
-    vol.data.par_iter_mut().for_each(|v| {
-        *v = *v * (-alpha * *v).exp();
-    });
+/// Computes a binary brain mask using Otsu's optimal thresholding algorithm,
+/// separating foreground tissue from background noise/skull space.
+pub fn generate_otsu_mask(vol: &Array3<f32>, n_bins: usize) -> Array3<f32> {
+    let mut min_val = f32::MAX;
+    let mut max_val = f32::MIN;
+
+    for &val in vol.iter() {
+        if val > 0.0 {
+            if val < min_val {
+                min_val = val;
+            }
+            if val > max_val {
+                max_val = val;
+            }
+        }
+    }
+
+    if min_val >= max_val {
+        return Array3::zeros(vol.raw_dim());
+    }
+
+    // Build intensity histogram
+    let mut histogram = vec![0u64; n_bins];
+    let range = max_val - min_val;
+    let mut total_pixels = 0u64;
+
+    for &val in vol.iter() {
+        if val > 0.0 {
+            let bin = (((val - min_val) / range) * (n_bins - 1) as f32) as usize;
+            let bin = bin.min(n_bins - 1);
+            histogram[bin] += 1;
+            total_pixels += 1;
+        }
+    }
+
+    if total_pixels == 0 {
+        return Array3::zeros(vol.raw_dim());
+    }
+
+    // Calculate optimal Otsu threshold maximizing between-class variance
+    let mut sum_b = 0.0f64;
+    let mut w_b = 0u64;
+    let mut max_variance = 0.0f64;
+    let mut threshold_bin = 0usize;
+
+    let sum_total: f64 = histogram
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| i as f64 * count as f64)
+        .sum();
+
+    for i in 0..n_bins {
+        w_b += histogram[i];
+        if w_b == 0 {
+            continue;
+        }
+        let w_f = total_pixels - w_b;
+        if w_f == 0 {
+            break;
+        }
+
+        sum_b += i as f64 * histogram[i] as f64;
+        let mean_b = sum_b / w_b as f64;
+        let mean_f = (sum_total - sum_b) / w_f as f64;
+
+        let variance_between = (w_b as f64) * (w_f as f64) * (mean_b - mean_f) * (mean_b - mean_f);
+
+        if variance_between > max_variance {
+            max_variance = variance_between;
+            threshold_bin = i;
+        }
+    }
+
+    let threshold_val = min_val + (threshold_bin as f32 / n_bins as f32) * range;
+
+    // Apply binary mask
+    vol.mapv(|val| if val >= threshold_val { 1.0 } else { 0.0 })
 }
 
-/// Generates a normalized 1D Gaussian kernel for a given standard deviation (sigma in voxels).
-fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
-    let radius = (3.0 * sigma).ceil() as usize;
+/// Applies 3D separable Gaussian convolution accounting for physical voxel
+/// dimensions (zooms: dx, dy, dz in mm) extracted from NIfTI affine metadata.
+pub fn gaussian_smooth_3d_anisotropic(vol: &mut Array3<f32>, sigma_mm: f32, zooms: [f32; 3]) {
+    let shape = vol.shape();
+    let (nx, ny, nz) = (shape[0], shape[1], shape[2]);
+
+    // Compute axis-specific kernel sigmas in voxel space: sigma_vox = sigma_mm / voxel_spacing
+    let sigmas_vox = [
+        sigma_mm / zooms[0],
+        sigma_mm / zooms[1],
+        sigma_mm / zooms[2],
+    ];
+
+    // Convolve Axis 0 (X)
+    let kernel_x = build_1d_gaussian_kernel(sigmas_vox[0]);
+    let mut temp = vol.clone();
+    for y in 0..ny {
+        for z in 0..nz {
+            for x in 0..nx {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                let k_len = kernel_x.len() as isize / 2;
+                for (i, &w) in kernel_x.iter().enumerate() {
+                    let ix = x as isize + i as isize - k_len;
+                    if ix >= 0 && ix < nx as isize {
+                        sum += vol[[ix as usize, y, z]] * w;
+                        weight += w;
+                    }
+                }
+                temp[[x, y, z]] = if weight > 0.0 { sum / weight } else { 0.0 };
+            }
+        }
+    }
+    *vol = temp.clone();
+
+    // Convolve Axis 1 (Y)
+    let kernel_y = build_1d_gaussian_kernel(sigmas_vox[1]);
+    for x in 0..nx {
+        for z in 0..nz {
+            for y in 0..ny {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                let k_len = kernel_y.len() as isize / 2;
+                for (i, &w) in kernel_y.iter().enumerate() {
+                    let iy = y as isize + i as isize - k_len;
+                    if iy >= 0 && iy < ny as isize {
+                        sum += vol[[x, iy as usize, z]] * w;
+                        weight += w;
+                    }
+                }
+                temp[[x, y, z]] = if weight > 0.0 { sum / weight } else { 0.0 };
+            }
+        }
+    }
+    *vol = temp.clone();
+
+    // Convolve Axis 2 (Z)
+    let kernel_z = build_1d_gaussian_kernel(sigmas_vox[2]);
+    for x in 0..nx {
+        for y in 0..ny {
+            for z in 0..nz {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                let k_len = kernel_z.len() as isize / 2;
+                for (i, &w) in kernel_z.iter().enumerate() {
+                    let iz = z as isize + i as isize - k_len;
+                    if iz >= 0 && iz < nz as isize {
+                        sum += vol[[x, y, iz as usize]] * w;
+                        weight += w;
+                    }
+                }
+                temp[[x, y, z]] = if weight > 0.0 { sum / weight } else { 0.0 };
+            }
+        }
+    }
+    *vol = temp;
+}
+
+fn build_1d_gaussian_kernel(sigma_vox: f32) -> Vec<f32> {
+    if sigma_vox <= 0.0 {
+        return vec![1.0];
+    }
+    let radius = (3.0 * sigma_vox).ceil() as usize;
     let size = 2 * radius + 1;
     let mut kernel = vec![0.0; size];
-    let two_sigma_sq = 2.0 * sigma * sigma;
-    let norm = 1.0 / ((2.0 * PI).sqrt() * sigma);
+    let two_sigma_sq = 2.0 * sigma_vox * sigma_vox;
 
-    let mut sum = 0.0;
     for i in 0..size {
         let x = i as f32 - radius as f32;
-        kernel[i] = norm * (-x * x / two_sigma_sq).exp();
-        sum += kernel[i];
-    }
-    // Normalize kernel so unit area is preserved
-    for k in kernel.iter_mut() {
-        *k /= sum;
+        kernel[i] = (-x * x / two_sigma_sq).exp();
     }
     kernel
 }
 
-/// Applies a 1D convolution along a specific axis of a 3D array buffer.
-fn blur_axis(src: &Array3<f32>, axis: usize, kernel: &[f32]) -> Array3<f32> {
-    let shape = src.shape();
-    let (nx, ny, nz) = (shape[0], shape[1], shape[2]);
-    let radius = kernel.len() / 2;
-    let mut dst = Array3::zeros((nx, ny, nz));
-
-    match axis {
-        0 => {
-            // Axis 0 (X-blur)
-            dst.axis_iter_mut(Axis(1))
-                .zip(src.axis_iter(Axis(1)))
-                .par_bridge()
-                .for_each(|(mut dst_slice, src_slice)| {
-                    for z in 0..nz {
-                        for x in 0..nx {
-                            let mut val = 0.0;
-                            for (k_idx, &k_val) in kernel.iter().enumerate() {
-                                let ix = (x as isize + k_idx as isize - radius as isize)
-                                    .clamp(0, nx as isize - 1)
-                                    as usize;
-                                val += src_slice[[ix, z]] * k_val;
-                            }
-                            dst_slice[[x, z]] = val;
-                        }
-                    }
-                });
-        }
-        1 => {
-            // Axis 1 (Y-blur)
-            dst.axis_iter_mut(Axis(0))
-                .zip(src.axis_iter(Axis(0)))
-                .par_bridge()
-                .for_each(|(mut dst_slice, src_slice)| {
-                    for z in 0..nz {
-                        for y in 0..ny {
-                            let mut val = 0.0;
-                            for (k_idx, &k_val) in kernel.iter().enumerate() {
-                                let iy = (y as isize + k_idx as isize - radius as isize)
-                                    .clamp(0, ny as isize - 1)
-                                    as usize;
-                                val += src_slice[[iy, z]] * k_val;
-                            }
-                            dst_slice[[y, z]] = val;
-                        }
-                    }
-                });
-        }
-        2 => {
-            // Axis 2 (Z-blur) - Corrected indexing
-            dst.axis_iter_mut(Axis(0))
-                .zip(src.axis_iter(Axis(0)))
-                .par_bridge()
-                .for_each(|(mut dst_slice, src_slice)| {
-                    for y in 0..ny {
-                        for z in 0..nz {
-                            let mut val = 0.0;
-                            for (k_idx, &k_val) in kernel.iter().enumerate() {
-                                let iz = (z as isize + k_idx as isize - radius as isize)
-                                    .clamp(0, nz as isize - 1)
-                                    as usize;
-                                val += src_slice[[y, iz]] * k_val;
-                            }
-                            dst_slice[[y, z]] = val;
-                        }
-                    }
-                });
-        }
-        _ => unreachable!(),
-    }
-    dst
-}
-
-/// Computes a full 3D separable Gaussian blur over dynamic volumes (3D or 4D).
-/// Applies 3D separable spatial blur in-place using double-buffered memory.
-pub fn gaussian_smooth_3d(vol: &mut Volume, sigma: f32) {
-    let kernel = gaussian_kernel_1d(sigma);
-    let shape = vol.data.shape();
-
-    if shape.len() == 3 {
-        let mut buf_a = vol
-            .data
-            .clone()
-            .into_dimensionality::<ndarray::Ix3>()
-            .unwrap();
-
-        // Ping-pong between buf_a and buf_b across the 3 spatial axes
-        let buf_b = blur_axis(&buf_a, 0, &kernel);
-        buf_a = blur_axis(&buf_b, 1, &kernel);
-        let final_buf = blur_axis(&buf_a, 2, &kernel);
-
-        vol.data = final_buf.into_dyn();
-    } else if shape.len() == 4 {
-        let n_volumes = shape[3];
-        let mut smoothed_4d = ndarray::Array4::zeros((shape[0], shape[1], shape[2], n_volumes));
-
-        // Parallelize across 4D gradient/time volumes directly with Rayon
-        smoothed_4d
-            .axis_iter_mut(Axis(3))
-            .zip(vol.data.axis_iter(Axis(3)))
-            .par_bridge()
-            .for_each(|(mut dst_3d, src_3d)| {
-                let slice_3d = src_3d
-                    .to_owned()
-                    .into_dimensionality::<ndarray::Ix3>()
-                    .unwrap();
-                let b1 = blur_axis(&slice_3d, 0, &kernel);
-                let b2 = blur_axis(&b1, 1, &kernel);
-                let b3 = blur_axis(&b2, 2, &kernel);
-                dst_3d.assign(&b3);
-            });
-
-        vol.data = smoothed_4d.into_dyn();
-    }
-}
-
-/// Computes a 3D Fractional Anisotropy map from a 4D DWI Volume.
-/// Expects gradient directions `gradients` (N x 3 matrix) and b-value `b_val`.
-pub fn compute_dti_fa(vol: &Volume, gradients: &[[f32; 3]], b_val: f32) -> Volume {
-    let shape = vol.data.shape();
-    assert_eq!(shape.len(), 4, "FA computation requires a 4D DWI volume");
-
+/// Fits a 3x3 diffusion tensor using Weighted Linear Least Squares (WLLS)
+/// variance weighting (W = diag(S^2)) to correct for log-transformation noise heteroscedasticity.
+pub fn compute_dti_fa_wlls(
+    dwi: &Array4<f32>,
+    gradients: &[[f32; 3]],
+    bvalue: f32,
+    mask: Option<&Array3<f32>>,
+) -> Array3<f32> {
+    let shape = dwi.shape();
     let (nx, ny, nz, n_dirs) = (shape[0], shape[1], shape[2], shape[3]);
-    assert_eq!(n_dirs, gradients.len());
 
-    // Pre-compute Pseudoinverse Matrix once outside the voxel loops
-    let w_pinv = {
-        let mut w_mat = nalgebra::DMatrix::<f32>::zeros(n_dirs - 1, 6);
-        for (r, g) in gradients[1..].iter().enumerate() {
-            let (gx, gy, gz) = (g[0], g[1], g[2]);
-            w_mat[(r, 0)] = gx * gx;
-            w_mat[(r, 1)] = 2.0 * gx * gy;
-            w_mat[(r, 2)] = 2.0 * gx * gz;
-            w_mat[(r, 3)] = gy * gy;
-            w_mat[(r, 4)] = 2.0 * gy * gz;
-            w_mat[(r, 5)] = gz * gz;
-        }
-        w_mat
-            .pseudo_inverse(1e-6)
-            .expect("singular gradient matrix")
-    };
+    // Build design matrix X (N x 7): [ -b*gx^2, -b*gy^2, -b*gz^2, -2b*gx*gy, -2b*gx*gz, -2b*gy*gz, 1 ]
+    let mut x_mat = DMatrix::<f32>::zeros(n_dirs, 7);
+    for i in 0..n_dirs {
+        let g = gradients[i];
+        let norm_sq = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+        let b = if norm_sq > 1e-4 { bvalue } else { 0.0 };
+
+        x_mat[(i, 0)] = -b * g[0] * g[0];
+        x_mat[(i, 1)] = -b * g[1] * g[1];
+        x_mat[(i, 2)] = -b * g[2] * g[2];
+        x_mat[(i, 3)] = -2.0 * b * g[0] * g[1];
+        x_mat[(i, 4)] = -2.0 * b * g[0] * g[2];
+        x_mat[(i, 5)] = -2.0 * b * g[1] * g[2];
+        x_mat[(i, 6)] = 1.0;
+    }
 
     let mut fa_map = Array3::<f32>::zeros((nx, ny, nz));
 
-    // Parallelize tensor fitting across 3D slice planes
-    fa_map
-        .axis_iter_mut(Axis(2))
-        .zip(vol.data.axis_iter(Axis(2)))
-        .par_bridge()
-        .for_each(|(mut fa_slice, dwi_slice)| {
-            // Allocate a stack-based buffer per thread to reuse across voxels
-            let mut y_arr = vec![0.0f32; n_dirs - 1];
+    for x in 0..nx {
+        for y in 0..ny {
+            for z in 0..nz {
+                if let Some(m) = mask
+                    && m[[x, y, z]] <= 0.0
+                {
+                    continue;
+                }
 
-            for x in 0..nx {
-                for y in 0..ny {
-                    let s0 = dwi_slice[[x, y, 0]];
-                    if s0 <= 10.0 {
-                        // Skip low-signal/background voxels
-                        fa_slice[[x, y]] = 0.0;
-                        continue;
+                let mut y_vec = DVector::<f32>::zeros(n_dirs);
+                let mut weights = DVector::<f32>::zeros(n_dirs);
+                let mut valid = true;
+
+                for i in 0..n_dirs {
+                    let s = dwi[[x, y, z, i]];
+                    if s <= 0.0 {
+                        valid = false;
+                        break;
                     }
+                    y_vec[i] = s.ln();
+                    // Weight W_ii = S_i^2 (heteroscedasticity variance scaling)
+                    weights[i] = s * s;
+                }
 
-                    // Populate reusable array without heap allocations inside the loop
-                    for i in 1..n_dirs {
-                        let si = dwi_slice[[x, y, i]].max(1.0);
-                        y_arr[i - 1] = (s0 / si).ln() / b_val;
+                if !valid {
+                    continue;
+                }
+
+                // Weighted system: (X^T W X) beta = X^T W y
+                let mut wx = x_mat.clone();
+                for i in 0..n_dirs {
+                    let w = weights[i];
+                    for j in 0..7 {
+                        wx[(i, j)] *= w;
                     }
+                }
 
-                    // Wrap contiguous slice into a Matrix view (Zero allocations)
-                    let y_vec = nalgebra::DVectorSlice::from_slice(&y_arr, n_dirs - 1);
+                let xt_w_x = x_mat.transpose() * &wx;
+                let xt_w_y = wx.transpose() * &y_vec;
 
-                    // Fit Tensor elements d = [Dxx, Dxy, Dxz, Dyy, Dyz, Dzz]
-                    let d = &w_pinv * y_vec;
+                if let Some(beta) = xt_w_x.lu().solve(&xt_w_y) {
+                    // Extract tensor components
+                    let (dxx, dyy, dzz) = (beta[0], beta[1], beta[2]);
+                    let (dxy, dxz, dyz) = (beta[3], beta[4], beta[5]);
 
-                    // Reconstruct 3x3 symmetric Tensor Matrix
-                    let tensor = Matrix3::new(d[0], d[1], d[2], d[1], d[3], d[4], d[2], d[4], d[5]);
+                    let tensor =
+                        SMatrix::<f32, 3, 3>::new(dxx, dxy, dxz, dxy, dyy, dyz, dxz, dyz, dzz);
 
-                    // Eigendecomposition
                     let eigen = tensor.symmetric_eigen();
                     let l1 = eigen.eigenvalues[0].max(0.0);
                     let l2 = eigen.eigenvalues[1].max(0.0);
                     let l3 = eigen.eigenvalues[2].max(0.0);
 
-                    let mean_diffusivity = (l1 + l2 + l3) / 3.0;
-                    let num = (l1 - mean_diffusivity).powi(2)
-                        + (l2 - mean_diffusivity).powi(2)
-                        + (l3 - mean_diffusivity).powi(2);
-                    let denom = l1.powi(2) + l2.powi(2) + l3.powi(2);
+                    let mean_diff = (l1 + l2 + l3) / 3.0;
+                    let num = ((l1 - mean_diff).powi(2)
+                        + (l2 - mean_diff).powi(2)
+                        + (l3 - mean_diff).powi(2))
+                    .sqrt();
+                    let denom = (l1 * l1 + l2 * l2 + l3 * l3).sqrt();
 
-                    let fa = if denom > 1e-8 {
-                        (1.5 * num / denom).sqrt().clamp(0.0, 1.0)
+                    let fa = if denom > 1e-6 {
+                        (1.5f32).sqrt() * (num / denom)
                     } else {
                         0.0
                     };
 
-                    fa_slice[[x, y]] = fa;
+                    fa_map[[x, y, z]] = fa.min(1.0);
                 }
             }
-        });
-
-    Volume {
-        data: fa_map.into_dyn(),
-        header: vol.header.clone(),
+        }
     }
+
+    fa_map
 }

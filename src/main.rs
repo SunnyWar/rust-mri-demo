@@ -14,10 +14,6 @@ struct Cli {
     /// Root folder containing BIDS dataset
     root: String,
 
-    /// Perfusion alpha scaling factor
-    #[arg(short, long, default_value_t = 0.01)]
-    alpha: f32,
-
     /// Gaussian blur sigma (mm) for 3D structural volumes
     #[arg(short = 's', long = "sigma-3d", default_value_t = 1.5)]
     sigma_3d: f32,
@@ -116,26 +112,68 @@ fn process_file(file: &Path, args: &Cli) {
     let start = Instant::now();
     let file_str = file.to_str().unwrap();
 
-    let mut vol = imaging::load_nifti(file_str);
+    let vol = imaging::load_nifti(file_str);
     let shape = vol.data.shape().to_vec();
 
-    let output_path = if shape.len() == 4 {
+    // Extract physical voxel dimensions (dx, dy, dz in mm) from header pixdim
+    // Defaults to 1.0mm isotropic if header metadata is unpopulated
+    let pixdim = vol.header.pixdim;
+    let zooms = [
+        if pixdim[1] > 0.0 { pixdim[1] } else { 1.0 },
+        if pixdim[2] > 0.0 { pixdim[2] } else { 1.0 },
+        if pixdim[3] > 0.0 { pixdim[3] } else { 1.0 },
+    ];
+
+    let (processed_data, output_suffix) = if shape.len() == 4 {
+        // Convert dynamic array to 4D for DTI analysis
+        let dwi = vol
+            .data
+            .into_dimensionality::<ndarray::Ix4>()
+            .expect("Expected 4D array shape for DWI dataset");
+
+        // Stage 1: Generate Otsu brain mask from b0 volume (index 0)
+        let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
+        let mask = ops::generate_otsu_mask(&b0, 256);
+
+        // Stage 2: Fit DTI tensor using Weighted Linear Least Squares (WLLS)
         let gradients = load_gradients(file, shape[3]);
-        let mut fa_vol = ops::compute_dti_fa(&vol, &gradients, args.bvalue);
+        let mut fa_map = ops::compute_dti_fa_wlls(&dwi, &gradients, args.bvalue, Some(&mask));
 
-        ops::gaussian_smooth_3d(&mut fa_vol, args.sigma_fa);
-        ops::perfusion_transform(&mut fa_vol, args.alpha);
-        vol = fa_vol;
+        // Stage 3: Anisotropic spatial Gaussian smoothing accounting for voxel zooms
+        ops::gaussian_smooth_3d_anisotropic(&mut fa_map, args.sigma_fa, zooms);
 
-        get_processed_output_path(file, "fa_processed")
+        (fa_map.into_dyn(), "fa_processed")
     } else {
-        ops::gaussian_smooth_3d(&mut vol, args.sigma_3d);
-        ops::perfusion_transform(&mut vol, args.alpha);
+        // Convert dynamic array to 3D for structural volume
+        let mut struct_vol = vol
+            .data
+            .into_dimensionality::<ndarray::Ix3>()
+            .expect("Expected 3D array shape for structural dataset");
 
-        get_processed_output_path(file, "smoothed_processed")
+        // Stage 1: Generate Otsu brain mask
+        let mask = ops::generate_otsu_mask(&struct_vol, 256);
+
+        // Stage 2: Anisotropic spatial smoothing
+        ops::gaussian_smooth_3d_anisotropic(&mut struct_vol, args.sigma_3d, zooms);
+
+        // Stage 3: Mask background voxels out of final volume
+        struct_vol.zip_mut_with(&mask, |val, &m| {
+            if m == 0.0 {
+                *val = 0.0;
+            }
+        });
+
+        (struct_vol.into_dyn(), "smoothed_processed")
     };
 
-    imaging::save_nifti(&vol, output_path.to_str().unwrap());
+    // Construct updated volume structure for export
+    let output_vol = imaging::Volume {
+        data: processed_data,
+        header: vol.header,
+    };
+
+    let output_path = get_processed_output_path(file, output_suffix);
+    imaging::save_nifti(&output_vol, output_path.to_str().unwrap());
 
     let elapsed = start.elapsed();
     println!(
