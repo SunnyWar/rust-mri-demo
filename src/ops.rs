@@ -157,32 +157,22 @@ pub fn compute_dti_fa(vol: &Volume, gradients: &[[f32; 3]], b_val: f32) -> Volum
     let (nx, ny, nz, n_dirs) = (shape[0], shape[1], shape[2], shape[3]);
     assert_eq!(n_dirs, gradients.len());
 
-    // Construct Design Matrix W for Least-Squares Tensor Estimation:
-    // ln(S_0 / S_i) / b = g_x^2 * Dxx + 2*g_x*g_y*Dxy + ...
-    let mut design_rows = Vec::with_capacity(n_dirs - 1);
-    for g in &gradients[1..] {
-        // Assume index 0 is S0 (b=0 baseline)
-        let (gx, gy, gz) = (g[0], g[1], g[2]);
-        design_rows.push([
-            gx * gx,
-            2.0 * gx * gy,
-            2.0 * gx * gz,
-            gy * gy,
-            2.0 * gy * gz,
-            gz * gz,
-        ]);
-    }
-
-    // Solve Pseudoinverse (W^T * W)^-1 * W^T
-    let mut w_mat = nalgebra::DMatrix::<f32>::zeros(n_dirs - 1, 6);
-    for (r, row) in design_rows.iter().enumerate() {
-        for c in 0..6 {
-            w_mat[(r, c)] = row[c];
+    // Pre-compute Pseudoinverse Matrix once outside the voxel loops
+    let w_pinv = {
+        let mut w_mat = nalgebra::DMatrix::<f32>::zeros(n_dirs - 1, 6);
+        for (r, g) in gradients[1..].iter().enumerate() {
+            let (gx, gy, gz) = (g[0], g[1], g[2]);
+            w_mat[(r, 0)] = gx * gx;
+            w_mat[(r, 1)] = 2.0 * gx * gy;
+            w_mat[(r, 2)] = 2.0 * gx * gz;
+            w_mat[(r, 3)] = gy * gy;
+            w_mat[(r, 4)] = 2.0 * gy * gz;
+            w_mat[(r, 5)] = gz * gz;
         }
-    }
-    let w_pinv = w_mat
-        .pseudo_inverse(1e-6)
-        .expect("singular gradient matrix");
+        w_mat
+            .pseudo_inverse(1e-6)
+            .expect("singular gradient matrix")
+    };
 
     let mut fa_map = Array3::<f32>::zeros((nx, ny, nz));
 
@@ -192,6 +182,9 @@ pub fn compute_dti_fa(vol: &Volume, gradients: &[[f32; 3]], b_val: f32) -> Volum
         .zip(vol.data.axis_iter(Axis(2)))
         .par_bridge()
         .for_each(|(mut fa_slice, dwi_slice)| {
+            // Allocate a stack-based buffer per thread to reuse across voxels
+            let mut y_arr = vec![0.0f32; n_dirs - 1];
+
             for x in 0..nx {
                 for y in 0..ny {
                     let s0 = dwi_slice[[x, y, 0]];
@@ -201,12 +194,14 @@ pub fn compute_dti_fa(vol: &Volume, gradients: &[[f32; 3]], b_val: f32) -> Volum
                         continue;
                     }
 
-                    // Compute log signal attenuation vector
-                    let mut y_vec = nalgebra::DVector::<f32>::zeros(n_dirs - 1);
+                    // Populate reusable array without heap allocations inside the loop
                     for i in 1..n_dirs {
                         let si = dwi_slice[[x, y, i]].max(1.0);
-                        y_vec[i - 1] = (s0 / si).ln() / b_val;
+                        y_arr[i - 1] = (s0 / si).ln() / b_val;
                     }
+
+                    // Wrap contiguous slice into a Matrix view (Zero allocations)
+                    let y_vec = nalgebra::DVectorSlice::from_slice(&y_arr, n_dirs - 1);
 
                     // Fit Tensor elements d = [Dxx, Dxy, Dxz, Dyy, Dyz, Dzz]
                     let d = &w_pinv * y_vec;
