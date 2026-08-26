@@ -7,7 +7,6 @@ use rayon::prelude::*;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 
@@ -17,9 +16,7 @@ use crate::{
         mean_diffusivity, radial_diffusivity, types::DtiError,
     },
     imaging::{
-        mask::generate_otsu_mask,
-        nifti::{Volume, load_nifti, save_nifti},
-        smooth::gaussian_smooth_3d_anisotropic,
+        mask::generate_otsu_mask, nifti::load_nifti, smooth::gaussian_smooth_3d_anisotropic,
     },
 };
 
@@ -141,10 +138,10 @@ fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
     let filename = file.file_name().unwrap().to_string_lossy();
 
     // Strip trailing .nii.gz or .nii
-    let stem = if filename.ends_with(".nii.gz") {
-        &filename[..filename.len() - 7]
-    } else if filename.ends_with(".nii") {
-        &filename[..filename.len() - 4]
+    let stem = if let Some(stripped) = filename.strip_suffix(".nii.gz") {
+        stripped
+    } else if let Some(stripped) = filename.strip_suffix(".nii") {
+        stripped
     } else {
         &filename
     };
@@ -262,10 +259,11 @@ fn save_scalar_map(
         .reference_header(header)
         .write_nifti(vol)
         .map_err(|e| {
-            ProcessError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to write NIfTI file {}: {}", out.display(), e),
-            ))
+            ProcessError::Io(std::io::Error::other(format!(
+                "Failed to write NIfTI file {}: {}",
+                out.display(),
+                e
+            )))
         })?;
 
     Ok(())
@@ -275,9 +273,7 @@ fn main() {
     let args = Cli::parse();
     let root = Path::new(&args.root);
     let all_start = Instant::now();
-
     let files = find_nii_gz_files(root);
-    let files_processed = AtomicUsize::new(0);
 
     println!("Found {} NIfTI files", files.len());
     println!("Processing dataset in parallel with Rayon...");

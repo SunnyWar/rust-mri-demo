@@ -25,11 +25,11 @@ pub fn load_nifti(path: &str) -> Result<Volume, ProcessError> {
         gz.read_to_end(&mut buffer).map_err(ProcessError::Io)?;
 
         InMemNiftiObject::from_reader(&buffer[..])
-            .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?
     } else {
         ReaderOptions::new()
             .read_file(file_path)
-            .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?
     };
 
     let header = obj.header().clone();
@@ -37,7 +37,7 @@ pub fn load_nifti(path: &str) -> Result<Volume, ProcessError> {
     let data = obj
         .into_volume()
         .into_ndarray::<f32>()
-        .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?;
 
     Ok(Volume { data, header })
 }
@@ -48,7 +48,7 @@ pub fn save_nifti(vol: &Volume, path: &str) -> Result<(), ProcessError> {
     WriterOptions::new(file_path)
         .reference_header(&vol.header)
         .write_nifti(&vol.data)
-        .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?;
 
     Ok(())
 }
