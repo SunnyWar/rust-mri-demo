@@ -1,7 +1,8 @@
 mod design;
 mod fit;
 mod metrics;
-mod types;
+
+pub mod types;
 
 pub use fit::fit_tensor_field;
 pub use metrics::{

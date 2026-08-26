@@ -7,48 +7,48 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+use crate::ProcessError;
+
 pub struct Volume {
     pub data: ArrayD<f32>,
     pub header: NiftiHeader,
 }
 
-pub fn load_nifti(path: &str) -> Volume {
+pub fn load_nifti(path: &str) -> Result<Volume, ProcessError> {
     let file_path = Path::new(path);
-    let file = File::open(file_path).unwrap_or_else(|e| panic!("Failed to open {}: {}", path, e));
+
+    let file = File::open(file_path).map_err(ProcessError::Io)?;
 
     let obj = if path.ends_with(".gz") {
-        let mut gz_decoder = GzDecoder::new(BufReader::new(file));
+        let mut gz = GzDecoder::new(BufReader::new(file));
         let mut buffer = Vec::new();
-        gz_decoder
-            .read_to_end(&mut buffer)
-            .unwrap_or_else(|e| panic!("Failed to decompress {}: {}", path, e));
+        gz.read_to_end(&mut buffer).map_err(ProcessError::Io)?;
 
-        let file =
-            File::open(file_path).unwrap_or_else(|e| panic!("Failed to open {}: {}", path, e));
-        let gz_decoder = GzDecoder::new(BufReader::new(file));
-
-        InMemNiftiObject::from_reader(gz_decoder)
-            .unwrap_or_else(|e| panic!("Failed to parse NIfTI stream for {}: {}", path, e))
+        InMemNiftiObject::from_reader(&buffer[..])
+            .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
     } else {
         ReaderOptions::new()
             .read_file(file_path)
-            .unwrap_or_else(|e| panic!("Failed to read NIfTI file {}: {}", path, e))
+            .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
     };
 
     let header = obj.header().clone();
+
     let data = obj
         .into_volume()
         .into_ndarray::<f32>()
-        .unwrap_or_else(|e| panic!("Failed to extract volume data for {}: {}", path, e));
+        .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-    Volume { data, header }
+    Ok(Volume { data, header })
 }
 
-pub fn save_nifti(vol: &Volume, path: &str) {
+pub fn save_nifti(vol: &Volume, path: &str) -> Result<(), ProcessError> {
     let file_path = Path::new(path);
 
     WriterOptions::new(file_path)
         .reference_header(&vol.header)
         .write_nifti(&vol.data)
-        .unwrap_or_else(|e| panic!("Failed to write NIfTI file {}: {}", path, e));
+        .map_err(|e| ProcessError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    Ok(())
 }
