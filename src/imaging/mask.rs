@@ -33,36 +33,42 @@ pub fn build_histogram(vol: &Array3<f32>, n_bins: usize) -> (Vec<u64>, f32, f32)
     (histogram, min_val, max_val)
 }
 
+/// Finds the histogram bin that maximizes between-class variance (Otsu's method).
 pub fn otsu_threshold_bin(histogram: &[u64], total_pixels: u64) -> usize {
-    let mut sum_b = 0.0f64;
-    let mut w_b = 0u64;
-    let mut max_variance = 0.0f64;
-    let mut threshold_bin = 0usize;
-
+    let total_pixels = total_pixels as f64;
     let sum_total: f64 = histogram
         .iter()
         .enumerate()
         .map(|(i, &count)| i as f64 * count as f64)
         .sum();
 
-    for i in 0..histogram.len() {
-        w_b += histogram[i];
+    let mut w_b = 0u64;
+    let mut sum_b = 0.0f64;
+    let mut max_variance = 0.0f64;
+    let mut threshold_bin = 0usize;
+
+    for (i, &count) in histogram.iter().enumerate() {
+        w_b += count;
         if w_b == 0 {
             continue;
         }
+        let w_b = w_b as f64;
         let w_f = total_pixels - w_b;
-        if w_f == 0 {
+        if w_f <= 0.0 {
             break;
         }
 
-        sum_b += i as f64 * histogram[i] as f64;
-        let mean_b = sum_b / w_b as f64;
-        let mean_f = (sum_total - sum_b) / w_f as f64;
+        sum_b += i as f64 * count as f64;
 
-        let variance_between = (w_b as f64) * (w_f as f64) * (mean_b - mean_f) * (mean_b - mean_f);
+        // Between-class variance, reformulated to need one division instead
+        // of two (no separate mean_b / mean_f):
+        //   variance = w_b * w_f * (mean_b - mean_f)^2
+        //            = (sum_b * total_pixels - sum_total * w_b)^2 / (w_b * w_f)
+        let diff = sum_b * total_pixels - sum_total * w_b;
+        let variance = diff * diff / (w_b * w_f);
 
-        if variance_between > max_variance {
-            max_variance = variance_between;
+        if variance > max_variance {
+            max_variance = variance;
             threshold_bin = i;
         }
     }
