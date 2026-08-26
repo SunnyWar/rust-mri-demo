@@ -1,22 +1,28 @@
 mod dti;
 mod imaging;
 
-use crate::dti::axial_diffusivity;
-use crate::dti::fractional_anisotropy;
-use crate::dti::mean_diffusivity;
-use crate::dti::radial_diffusivity;
-use crate::dti::{compute_scalar_map, fit_tensor_field};
-use crate::imaging::mask::generate_otsu_mask;
-use crate::imaging::nifti::Volume;
-use crate::imaging::nifti::{load_nifti, save_nifti};
-use crate::imaging::smooth::gaussian_smooth_3d_anisotropic;
 use clap::Parser;
-use nifti::NiftiHeader;
 use rayon::prelude::*;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
+
+use crate::{
+    dti::{
+        axial_diffusivity, compute_scalar_map, fit_tensor_field, fractional_anisotropy,
+        mean_diffusivity, radial_diffusivity,
+    },
+    imaging::{
+        mask::generate_otsu_mask,
+        nifti::{Volume, load_nifti, save_nifti},
+        smooth::gaussian_smooth_3d_anisotropic,
+    },
+};
+
+use nifti::NiftiHeader;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
