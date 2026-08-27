@@ -1,7 +1,6 @@
 use flate2::read::GzDecoder;
 use ndarray::ArrayD;
-use nifti::{
-    InMemNiftiObject, IntoNdArray, NiftiHeader, NiftiObject, ReaderOptions};
+use nifti::{InMemNiftiObject, IntoNdArray, NiftiHeader, NiftiObject, ReaderOptions};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
