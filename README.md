@@ -29,9 +29,9 @@ Built as a high-performance compute backend for neuroimaging research, this pipe
 | Metric | Measurement |
 | :--- | :--- |
 | **Dataset Size** | 140 NIfTI volumes (3D T1w / 4D DWI) |
-| **Total Wall Clock Time** | **17.503 seconds** |
-| **Average Per-Volume Latency** | **~125 ms / volume** |
-| **Throughput** | **~8.00 volumes / sec** |
+| **Total Wall Clock Time** | **11.333 seconds** |
+| **Average Per-Volume Latency** | **~81 ms / volume** |
+| **Throughput** | **~12.35 volumes / sec** |
 
 *Benchmarked across 140 subject files including I/O, Otsu masking, WLLS tensor fitting, anisotropic smoothing, and Gzip compression.*
 
