@@ -17,7 +17,9 @@ use crate::{
         mean_diffusivity, radial_diffusivity, types::DtiError,
     },
     imaging::{
-        io::find_nii_gz_files, mask::generate_otsu_mask, nifti::load_nifti,
+        io::{find_nii_gz_files, get_processed_output_path},
+        mask::generate_otsu_mask,
+        nifti::load_nifti,
         smooth::gaussian_smooth_3d_anisotropic,
     },
 };
@@ -56,21 +58,6 @@ enum ProcessError {
     UnexpectedShape { path: PathBuf, ndim: usize },
     TensorFitFailed { path: PathBuf, reason: DtiError },
     Io(std::io::Error),
-}
-
-fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
-    let filename = file.file_name().unwrap().to_string_lossy();
-
-    // Strip trailing .nii.gz or .nii
-    let stem = if let Some(stripped) = filename.strip_suffix(".nii.gz") {
-        stripped
-    } else if let Some(stripped) = filename.strip_suffix(".nii") {
-        stripped
-    } else {
-        &filename
-    };
-
-    file.with_file_name(format!("{}_{}.nii.gz", stem, suffix))
 }
 
 fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
@@ -231,29 +218,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::tempdir;
-
-    // --- get_processed_output_path tests ---
-
-    #[test]
-    fn test_get_processed_output_path_strips_extensions() {
-        let p_gz = Path::new("/data/subject01_dwi.nii.gz");
-        let out_fa = get_processed_output_path(p_gz, "fa_processed");
-        assert_eq!(
-            out_fa,
-            PathBuf::from("/data/subject01_dwi_fa_processed.nii.gz")
-        );
-
-        let p_nii = Path::new("/data/subject01_t1.nii");
-        let out_smooth = get_processed_output_path(p_nii, "smoothed_processed");
-        assert_eq!(
-            out_smooth,
-            PathBuf::from("/data/subject01_t1_smoothed_processed.nii.gz")
-        );
-    }
 
     // --- CLI argument parsing tests ---
 

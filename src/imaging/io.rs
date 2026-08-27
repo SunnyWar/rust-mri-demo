@@ -81,6 +81,21 @@ pub fn load_gradients(nifti_path: &Path, n_dirs: usize) -> Result<Vec<[f32; 3]>,
     Ok(gradients)
 }
 
+pub fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
+    let filename = file.file_name().unwrap().to_string_lossy();
+
+    // Strip trailing .nii.gz or .nii
+    let stem = if let Some(stripped) = filename.strip_suffix(".nii.gz") {
+        stripped
+    } else if let Some(stripped) = filename.strip_suffix(".nii") {
+        stripped
+    } else {
+        &filename
+    };
+
+    file.with_file_name(format!("{}_{}.nii.gz", stem, suffix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +103,25 @@ mod tests {
     use std::io::Write;
     use std::{f32, fs};
     use tempfile::tempdir;
+
+    // --- get_processed_output_path tests ---
+
+    #[test]
+    fn test_get_processed_output_path_strips_extensions() {
+        let p_gz = Path::new("/data/subject01_dwi.nii.gz");
+        let out_fa = get_processed_output_path(p_gz, "fa_processed");
+        assert_eq!(
+            out_fa,
+            PathBuf::from("/data/subject01_dwi_fa_processed.nii.gz")
+        );
+
+        let p_nii = Path::new("/data/subject01_t1.nii");
+        let out_smooth = get_processed_output_path(p_nii, "smoothed_processed");
+        assert_eq!(
+            out_smooth,
+            PathBuf::from("/data/subject01_t1_smoothed_processed.nii.gz")
+        );
+    }
 
     #[test]
     fn test_find_nii_gz_files_recurses_and_filters_outputs() -> std::io::Result<()> {
