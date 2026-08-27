@@ -1,11 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::pipeline::ProcessError;
 use ndarray::Array3;
 use nifti::NiftiHeader;
 use nifti::writer::WriterOptions;
-
-use crate::ProcessError;
 
 pub fn find_nii_gz_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();

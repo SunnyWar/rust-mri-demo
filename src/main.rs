@@ -3,13 +3,10 @@ mod imaging;
 
 use clap::Parser;
 use rayon::prelude::*;
-use std::{
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{path::Path, time::Instant};
 mod pipeline;
 
-use crate::{dti::types::DtiError, imaging::io::find_nii_gz_files, pipeline::process_file};
+use crate::{imaging::io::find_nii_gz_files, pipeline::process_file};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -36,13 +33,6 @@ struct Cli {
     /// Also output a radial diffusivity map
     #[arg(long)]
     emit_rd: bool,
-}
-
-#[derive(Debug)]
-enum ProcessError {
-    UnexpectedShape { path: PathBuf, ndim: usize },
-    TensorFitFailed { path: PathBuf, reason: DtiError },
-    Io(std::io::Error),
 }
 
 fn main() {
@@ -83,8 +73,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- CLI argument parsing tests ---
 
     #[test]
     fn test_cli_defaults() {

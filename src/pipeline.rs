@@ -1,14 +1,22 @@
 use crate::Cli;
+use crate::dti::types::DtiError;
 use crate::dti::{
     axial_diffusivity, compute_scalar_map, fit_tensor_field, fractional_anisotropy,
     mean_diffusivity, radial_diffusivity,
 };
 use crate::imaging::io::{load_gradients, save_scalar_map};
 use crate::imaging::mask::generate_otsu_mask;
+use crate::imaging::nifti::load_nifti;
 use crate::imaging::smooth::gaussian_smooth_3d_anisotropic;
-use crate::{ProcessError, imaging::nifti::load_nifti};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+#[derive(Debug)]
+pub enum ProcessError {
+    UnexpectedShape { path: PathBuf, ndim: usize },
+    TensorFitFailed { path: PathBuf, reason: DtiError },
+    Io(std::io::Error),
+}
 
 pub fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
     let start = Instant::now();

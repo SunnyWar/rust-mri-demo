@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use crate::ProcessError;
+use crate::pipeline::ProcessError;
 
 pub struct Volume {
     pub data: ArrayD<f32>,
