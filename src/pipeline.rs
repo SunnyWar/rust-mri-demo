@@ -1,4 +1,4 @@
-use crate::Cli;
+use crate::cli::Cli;
 use crate::dti::types::DtiError;
 use crate::dti::{
     axial_diffusivity, compute_scalar_map, fit_tensor_field, fractional_anisotropy,
