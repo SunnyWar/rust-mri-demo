@@ -69,8 +69,6 @@ pub fn compute_scalar_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array4;
-
     const EPSILON: f32 = 1e-4;
 
     #[inline]
