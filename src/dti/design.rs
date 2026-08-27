@@ -31,12 +31,86 @@ pub fn build_design_matrix(gradients: &[[f32; 3]], bvalue: f32) -> DMatrix<f32> 
 mod tests {
     use super::*;
 
+    #[inline]
+    fn assert_near(actual: f32, expected: f32) {
+        let abs_err = (actual - expected).abs();
+        // Use relative tolerance scaled to magnitude, with an absolute floor for zero
+        let max_val = actual.abs().max(expected.abs());
+        let tol = 1e-4 * max_val.max(1.0);
+
+        assert!(
+            abs_err <= tol,
+            "expected {expected}, got {actual} (diff: {abs_err}, tol: {tol})"
+        );
+    }
+
     #[test]
-    fn zero_gradient_row_has_zero_b_columns() {
+    fn test_dimensions_and_structure() {
+        let gradients = vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let x = build_design_matrix(&gradients, 1000.0);
+
+        assert_eq!(x.nrows(), 3);
+        assert_eq!(x.ncols(), 7);
+    }
+
+    #[test]
+    fn test_zero_gradient_row_has_zero_b_columns() {
         let x = build_design_matrix(&[[0.0, 0.0, 0.0]], 1000.0);
         for j in 0..6 {
             assert_eq!(x[(0, j)], 0.0);
         }
         assert_eq!(x[(0, 6)], 1.0);
+    }
+
+    #[test]
+    fn test_sub_threshold_gradient_zeroed() {
+        // Gradient norm squared < 1e-4 (e.g., |g| = 0.005, norm_sq = 0.00005)
+        let x = build_design_matrix(&[[0.005, 0.005, 0.0]], 1000.0);
+        for j in 0..6 {
+            assert_eq!(x[(0, j)], 0.0);
+        }
+        assert_eq!(x[(0, 6)], 1.0);
+    }
+
+    #[test]
+    fn test_single_axis_gradient() {
+        let gradients = vec![[1.0, 0.0, 0.0]];
+        let x = build_design_matrix(&gradients, 1000.0);
+
+        // Expected row: [-1000, 0, 0, 0, 0, 0, 1]
+        assert_near(x[(0, 0)], -1000.0);
+        assert_near(x[(0, 1)], 0.0);
+        assert_near(x[(0, 2)], 0.0);
+        assert_near(x[(0, 3)], 0.0);
+        assert_near(x[(0, 4)], 0.0);
+        assert_near(x[(0, 5)], 0.0);
+        assert_near(x[(0, 6)], 1.0);
+    }
+
+    #[test]
+    fn test_off_axis_gradient_cross_terms() {
+        // g = [1/sqrt(2), 1/sqrt(2), 0]
+        let val = 1.0 / 2.0_f32.sqrt();
+        let gradients = vec![[val, val, 0.0]];
+        let bvalue = 1000.0;
+        let x = build_design_matrix(&gradients, bvalue);
+
+        // -b * gx^2 = -1000 * 0.5 = -500
+        // -b * gy^2 = -1000 * 0.5 = -500
+        // -2b * gx * gy = -2 * 1000 * 0.5 = -1000
+        assert_near(x[(0, 0)], -500.0);
+        assert_near(x[(0, 1)], -500.0);
+        assert_near(x[(0, 2)], 0.0);
+        assert_near(x[(0, 3)], -1000.0);
+        assert_near(x[(0, 4)], 0.0);
+        assert_near(x[(0, 5)], 0.0);
+        assert_near(x[(0, 6)], 1.0);
+    }
+
+    #[test]
+    fn test_empty_gradients() {
+        let x = build_design_matrix(&[], 1000.0);
+        assert_eq!(x.nrows(), 0);
+        assert_eq!(x.ncols(), 7);
     }
 }
