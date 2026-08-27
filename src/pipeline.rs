@@ -28,30 +28,6 @@ pub enum ProcessError {
     InvalidPath { path: PathBuf },
 }
 
-/// Configuration for processing 4D DWI volumes.
-struct DwiProcessingConfig<'a> {
-    dwi: ndarray::Array4<f32>,
-    gradients: Vec<[f32; 3]>,
-    bvalue: f32,
-    mask: ndarray::Array3<f32>,
-    zooms: [f32; 3],
-    sigma_fa: f32,
-    header: &'a NiftiHeader,
-    file: &'a Path,
-    emit_md: bool,
-    emit_ad: bool,
-    emit_rd: bool,
-}
-
-/// Configuration for processing 3D structural volumes.
-struct StructProcessingConfig<'a> {
-    struct_vol: ndarray::Array3<f32>,
-    zooms: [f32; 3],
-    sigma_3d: f32,
-    header: &'a NiftiHeader,
-    file: &'a Path,
-}
-
 /// Extracts non-zero pixdim values, defaulting to 1.0 if zero or negative.
 fn extract_zooms(pixdim: &[f32; 8]) -> [f32; 3] {
     [
@@ -70,109 +46,28 @@ fn apply_mask(vol: &mut ndarray::Array3<f32>, mask: &ndarray::Array3<f32>) {
     });
 }
 
-/// Processes a 4D DWI volume.
-fn process_4d(config: DwiProcessingConfig) -> Result<(), ProcessError> {
-    let DwiProcessingConfig {
-        dwi,
-        gradients,
-        bvalue,
-        mask,
-        zooms,
-        sigma_fa,
-        header,
-        file,
-        emit_md,
-        emit_ad,
-        emit_rd,
-    } = config;
-
-    let field = fit_tensor_field(&dwi, &gradients, bvalue, Some(&mask)).map_err(|reason| {
-        ProcessError::TensorFitFailed {
-            path: file.to_owned(),
-            reason,
-        }
-    })?;
-
-    let mut fa_map = compute_scalar_map(&field, fractional_anisotropy);
-    gaussian_smooth_3d_anisotropic(&mut fa_map, sigma_fa, zooms);
-    save_scalar_map(&fa_map, file, "fa_processed", header)?;
-
-    if emit_md {
-        let mut md_map = compute_scalar_map(&field, mean_diffusivity);
-        gaussian_smooth_3d_anisotropic(&mut md_map, sigma_fa, zooms);
-        save_scalar_map(&md_map, file, "md_processed", header)?;
-    }
-
-    if emit_ad {
-        let mut ad_map = compute_scalar_map(&field, axial_diffusivity);
-        gaussian_smooth_3d_anisotropic(&mut ad_map, sigma_fa, zooms);
-        save_scalar_map(&ad_map, file, "ad_processed", header)?;
-    }
-
-    if emit_rd {
-        let mut rd_map = compute_scalar_map(&field, radial_diffusivity);
-        gaussian_smooth_3d_anisotropic(&mut rd_map, sigma_fa, zooms);
-        save_scalar_map(&rd_map, file, "rd_processed", header)?;
-    }
-
-    Ok(())
-}
-
-/// Processes a 3D structural volume.
-fn process_3d(config: StructProcessingConfig) -> Result<(), ProcessError> {
-    let StructProcessingConfig {
-        mut struct_vol,
-        zooms,
-        sigma_3d,
-        header,
-        file,
-    } = config;
-
-    let mask = generate_otsu_mask(&struct_vol, 256);
-    gaussian_smooth_3d_anisotropic(&mut struct_vol, sigma_3d, zooms);
-    apply_mask(&mut struct_vol, &mask);
-    save_scalar_map(&struct_vol, file, "smoothed_processed", header)?;
-    Ok(())
-}
-
 pub fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
     let start = Instant::now();
 
-    let file_str = file.to_str().ok_or(ProcessError::InvalidPath {
+    let file_str = file.to_str().ok_or_else(|| ProcessError::InvalidPath {
         path: file.to_owned(),
     })?;
 
     let vol = load_nifti(file_str)?;
-    let shape = vol.data.shape().to_vec();
+    let ndim = vol.data.ndim(); // Read rank directly without holding a slice borrow
     let zooms = extract_zooms(&vol.header.pixdim);
 
-    match shape.len() {
+    match ndim {
         4 => {
             let dwi = vol
                 .data
                 .into_dimensionality::<ndarray::Ix4>()
                 .map_err(|_| ProcessError::UnexpectedShape {
                     path: file.to_owned(),
-                    ndim: shape.len(),
+                    ndim,
                 })?;
-            let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
-            let mask = generate_otsu_mask(&b0, 256);
-            let gradients = load_gradients(file, shape[3])?;
 
-            let config = DwiProcessingConfig {
-                dwi,
-                gradients,
-                bvalue: args.bvalue,
-                mask,
-                zooms,
-                sigma_fa: args.sigma_fa,
-                header: &vol.header,
-                file,
-                emit_md: args.emit_md,
-                emit_ad: args.emit_ad,
-                emit_rd: args.emit_rd,
-            };
-            process_4d(config)?;
+            run_dwi_pipeline(file, &vol.header, dwi, zooms, args)?;
         }
         3 => {
             let struct_vol = vol
@@ -180,34 +75,80 @@ pub fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
                 .into_dimensionality::<ndarray::Ix3>()
                 .map_err(|_| ProcessError::UnexpectedShape {
                     path: file.to_owned(),
-                    ndim: shape.len(),
+                    ndim,
                 })?;
 
-            let config = StructProcessingConfig {
-                struct_vol,
-                zooms,
-                sigma_3d: args.sigma_3d,
-                header: &vol.header,
-                file,
-            };
-            process_3d(config)?;
+            run_structural_pipeline(file, &vol.header, struct_vol, zooms, args.sigma_3d)?;
         }
         _ => {
             return Err(ProcessError::UnexpectedShape {
                 path: file.to_owned(),
-                ndim: shape.len(),
+                ndim,
             });
         }
     }
 
-    let elapsed = start.elapsed();
     println!(
         "Processed: {} ({:.3}s)",
         file.file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("<invalid filename>"),
-        elapsed.as_secs_f32()
+        start.elapsed().as_secs_f32()
     );
+
+    Ok(())
+}
+
+fn run_dwi_pipeline(
+    file: &Path,
+    header: &NiftiHeader,
+    dwi: ndarray::Array4<f32>,
+    zooms: [f32; 3],
+    args: &Cli,
+) -> Result<(), ProcessError> {
+    let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
+    let mask = generate_otsu_mask(&b0, 256);
+    let gradients = load_gradients(file, dwi.shape()[3])?;
+
+    let field = fit_tensor_field(&dwi, &gradients, args.bvalue, Some(&mask)).map_err(|reason| {
+        ProcessError::TensorFitFailed {
+            path: file.to_owned(),
+            reason,
+        }
+    })?;
+
+    // Map output flags to scalar functions and suffix names
+    let outputs = [
+        (true, "fa_processed", fractional_anisotropy as fn(&_) -> _),
+        (args.emit_md, "md_processed", mean_diffusivity),
+        (args.emit_ad, "ad_processed", axial_diffusivity),
+        (args.emit_rd, "rd_processed", radial_diffusivity),
+    ];
+
+    for (enabled, suffix, scalar_fn) in outputs {
+        if enabled {
+            let mut scalar_map = compute_scalar_map(&field, scalar_fn);
+            gaussian_smooth_3d_anisotropic(&mut scalar_map, args.sigma_fa, zooms);
+            save_scalar_map(&scalar_map, file, suffix, header)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_structural_pipeline(
+    file: &Path,
+    header: &NiftiHeader,
+    mut struct_vol: ndarray::Array3<f32>,
+    zooms: [f32; 3],
+    sigma_3d: f32,
+) -> Result<(), ProcessError> {
+    let mask = generate_otsu_mask(&struct_vol, 256);
+
+    gaussian_smooth_3d_anisotropic(&mut struct_vol, sigma_3d, zooms);
+    apply_mask(&mut struct_vol, &mask);
+
+    save_scalar_map(&struct_vol, file, "smoothed_processed", header)?;
 
     Ok(())
 }
