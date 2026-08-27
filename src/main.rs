@@ -2,6 +2,7 @@ mod dti;
 mod imaging;
 
 use clap::Parser;
+use imaging::io::load_gradients;
 use ndarray::Array3;
 use rayon::prelude::*;
 use std::{
@@ -55,55 +56,6 @@ enum ProcessError {
     UnexpectedShape { path: PathBuf, ndim: usize },
     TensorFitFailed { path: PathBuf, reason: DtiError },
     Io(std::io::Error),
-}
-
-// Helper to attempt reading associated .bvec gradient files for 4D DWI scans
-fn load_gradients(nifti_path: &Path, n_dirs: usize) -> Result<Vec<[f32; 3]>, ProcessError> {
-    let bvec_path = nifti_path.with_extension("").with_extension("bvec");
-
-    // Try reading .bvec file
-    if bvec_path.exists() {
-        let content = fs::read_to_string(&bvec_path).map_err(ProcessError::Io)?;
-        let lines: Vec<&str> = content.lines().collect();
-
-        if lines.len() >= 3 {
-            let parse_line = |line: &str| -> Result<Vec<f32>, ProcessError> {
-                line.split_whitespace()
-                    .map(|s| {
-                        s.parse::<f32>().map_err(|e| {
-                            ProcessError::Io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("Invalid float in {}: {}", bvec_path.display(), e),
-                            ))
-                        })
-                    })
-                    .collect()
-            };
-
-            let xs = parse_line(lines[0])?;
-            let ys = parse_line(lines[1])?;
-            let zs = parse_line(lines[2])?;
-
-            if xs.len() == n_dirs && ys.len() == n_dirs && zs.len() == n_dirs {
-                let grads = (0..n_dirs)
-                    .map(|i| [xs[i], ys[i], zs[i]])
-                    .collect::<Vec<_>>();
-                return Ok(grads);
-            }
-        }
-    }
-
-    // Fallback synthetic gradient directions
-    let mut gradients = Vec::with_capacity(n_dirs);
-    gradients.push([0.0, 0.0, 0.0]); // baseline S0
-
-    for i in 1..n_dirs {
-        let theta = i as f32 * 0.5;
-        let phi = i as f32 * 0.3;
-        gradients.push([theta.cos() * phi.sin(), theta.sin() * phi.sin(), phi.cos()]);
-    }
-
-    Ok(gradients)
 }
 
 fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
