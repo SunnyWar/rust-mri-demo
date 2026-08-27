@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ndarray::Array3;
+use nifti::NiftiHeader;
+use nifti::writer::WriterOptions;
+
 use crate::ProcessError;
 
 pub fn find_nii_gz_files(root: &Path) -> Vec<PathBuf> {
@@ -94,6 +98,28 @@ pub fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
     };
 
     file.with_file_name(format!("{}_{}.nii.gz", stem, suffix))
+}
+
+pub fn save_scalar_map(
+    vol: &Array3<f32>,
+    file: &Path,
+    suffix: &str,
+    header: &NiftiHeader,
+) -> Result<(), ProcessError> {
+    let out = get_processed_output_path(file, suffix);
+
+    WriterOptions::new(&out)
+        .reference_header(header)
+        .write_nifti(vol)
+        .map_err(|e| {
+            ProcessError::Io(std::io::Error::other(format!(
+                "Failed to write NIfTI file {}: {}",
+                out.display(),
+                e
+            )))
+        })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

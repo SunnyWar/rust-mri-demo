@@ -3,10 +3,8 @@ mod imaging;
 
 use clap::Parser;
 use imaging::io::load_gradients;
-use ndarray::Array3;
 use rayon::prelude::*;
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -17,14 +15,12 @@ use crate::{
         mean_diffusivity, radial_diffusivity, types::DtiError,
     },
     imaging::{
-        io::{find_nii_gz_files, get_processed_output_path},
+        io::{find_nii_gz_files, save_scalar_map},
         mask::generate_otsu_mask,
         nifti::load_nifti,
         smooth::gaussian_smooth_3d_anisotropic,
     },
 };
-
-use nifti::{NiftiHeader, writer::WriterOptions};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -154,28 +150,6 @@ fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
             .unwrap_or("<invalid filename>"),
         elapsed.as_secs_f32()
     );
-
-    Ok(())
-}
-
-fn save_scalar_map(
-    vol: &Array3<f32>,
-    file: &Path,
-    suffix: &str,
-    header: &NiftiHeader,
-) -> Result<(), ProcessError> {
-    let out = get_processed_output_path(file, suffix);
-
-    WriterOptions::new(&out)
-        .reference_header(header)
-        .write_nifti(vol)
-        .map_err(|e| {
-            ProcessError::Io(std::io::Error::other(format!(
-                "Failed to write NIfTI file {}: {}",
-                out.display(),
-                e
-            )))
-        })?;
 
     Ok(())
 }
