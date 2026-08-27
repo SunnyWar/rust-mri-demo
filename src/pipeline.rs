@@ -8,6 +8,7 @@ use crate::imaging::io::{load_gradients, save_scalar_map};
 use crate::imaging::mask::generate_otsu_mask;
 use crate::imaging::nifti::load_nifti;
 use crate::imaging::smooth::gaussian_smooth_3d_anisotropic;
+use nifti::NiftiHeader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -16,92 +17,185 @@ pub enum ProcessError {
     UnexpectedShape { path: PathBuf, ndim: usize },
     TensorFitFailed { path: PathBuf, reason: DtiError },
     Io(std::io::Error),
+    InvalidPath { path: PathBuf },
+}
+
+impl std::fmt::Display for ProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcessError::UnexpectedShape { path, ndim } => {
+                write!(
+                    f,
+                    "Unexpected shape for file {}: {} dimensions",
+                    path.display(),
+                    ndim
+                )
+            }
+            ProcessError::TensorFitFailed { path, reason } => {
+                write!(
+                    f,
+                    "Tensor fit failed for file {}: {}",
+                    path.display(),
+                    reason
+                )
+            }
+            ProcessError::Io(e) => write!(f, "IO error: {}", e),
+            ProcessError::InvalidPath { path } => {
+                write!(f, "Invalid path: {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProcessError {}
+
+impl From<std::io::Error> for ProcessError {
+    fn from(err: std::io::Error) -> Self {
+        ProcessError::Io(err)
+    }
+}
+
+impl From<DtiError> for ProcessError {
+    fn from(err: DtiError) -> Self {
+        ProcessError::TensorFitFailed {
+            path: PathBuf::new(),
+            reason: err,
+        }
+    }
+}
+
+/// Extracts non-zero pixdim values, defaulting to 1.0 if zero or negative.
+fn extract_zooms(pixdim: &[f32; 8]) -> [f32; 3] {
+    [
+        if pixdim[1] > 0.0 { pixdim[1] } else { 1.0 },
+        if pixdim[2] > 0.0 { pixdim[2] } else { 1.0 },
+        if pixdim[3] > 0.0 { pixdim[3] } else { 1.0 },
+    ]
+}
+
+/// Applies a mask to a volume, zeroing out masked voxels.
+fn apply_mask(vol: &mut ndarray::Array3<f32>, mask: &ndarray::Array3<f32>) {
+    vol.zip_mut_with(mask, |val, &m| {
+        if m == 0.0 {
+            *val = 0.0;
+        }
+    });
+}
+
+/// Processes a 4D DWI volume.
+fn process_4d(
+    dwi: ndarray::Array4<f32>,
+    gradients: Vec<[f32; 3]>,
+    bvalue: f32,
+    mask: ndarray::Array3<f32>,
+    zooms: [f32; 3],
+    sigma_fa: f32,
+    header: &NiftiHeader,
+    file: &Path,
+    emit_md: bool,
+    emit_ad: bool,
+    emit_rd: bool,
+) -> Result<(), ProcessError> {
+    let field = fit_tensor_field(&dwi, &gradients, bvalue, Some(&mask)).map_err(|reason| {
+        ProcessError::TensorFitFailed {
+            path: file.to_owned(),
+            reason,
+        }
+    })?;
+
+    let mut fa_map = compute_scalar_map(&field, fractional_anisotropy);
+    gaussian_smooth_3d_anisotropic(&mut fa_map, sigma_fa, zooms);
+    save_scalar_map(&fa_map, file, "fa_processed", header)?;
+
+    if emit_md {
+        let mut md_map = compute_scalar_map(&field, mean_diffusivity);
+        gaussian_smooth_3d_anisotropic(&mut md_map, sigma_fa, zooms);
+        save_scalar_map(&md_map, file, "md_processed", header)?;
+    }
+
+    if emit_ad {
+        let mut ad_map = compute_scalar_map(&field, axial_diffusivity);
+        gaussian_smooth_3d_anisotropic(&mut ad_map, sigma_fa, zooms);
+        save_scalar_map(&ad_map, file, "ad_processed", header)?;
+    }
+
+    if emit_rd {
+        let mut rd_map = compute_scalar_map(&field, radial_diffusivity);
+        gaussian_smooth_3d_anisotropic(&mut rd_map, sigma_fa, zooms);
+        save_scalar_map(&rd_map, file, "rd_processed", header)?;
+    }
+
+    Ok(())
+}
+
+/// Processes a 3D structural volume.
+fn process_3d(
+    mut struct_vol: ndarray::Array3<f32>,
+    zooms: [f32; 3],
+    sigma_3d: f32,
+    header: &NiftiHeader,
+    file: &Path,
+) -> Result<(), ProcessError> {
+    let mask = generate_otsu_mask(&struct_vol, 256);
+    gaussian_smooth_3d_anisotropic(&mut struct_vol, sigma_3d, zooms);
+    apply_mask(&mut struct_vol, &mask);
+    save_scalar_map(&struct_vol, file, "smoothed_processed", header)?;
+    Ok(())
 }
 
 pub fn process_file(file: &Path, args: &Cli) -> Result<(), ProcessError> {
     let start = Instant::now();
 
-    let file_str = file.to_str().ok_or_else(|| ProcessError::UnexpectedShape {
+    let file_str = file.to_str().ok_or(ProcessError::InvalidPath {
         path: file.to_owned(),
-        ndim: 0,
     })?;
 
     let vol = load_nifti(file_str)?;
     let shape = vol.data.shape().to_vec();
+    let zooms = extract_zooms(&vol.header.pixdim);
 
-    let pixdim = vol.header.pixdim;
-    let zooms = [
-        if pixdim[1] > 0.0 { pixdim[1] } else { 1.0 },
-        if pixdim[2] > 0.0 { pixdim[2] } else { 1.0 },
-        if pixdim[3] > 0.0 { pixdim[3] } else { 1.0 },
-    ];
-
-    if shape.len() == 4 {
-        let dwi = vol
-            .data
-            .into_dimensionality::<ndarray::Ix4>()
-            .map_err(|_| ProcessError::UnexpectedShape {
-                path: file.to_owned(),
-                ndim: shape.len(),
-            })?;
-
-        let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
-        let mask = generate_otsu_mask(&b0, 256);
-        let gradients = load_gradients(file, shape[3])?;
-
-        let field =
-            fit_tensor_field(&dwi, &gradients, args.bvalue, Some(&mask)).map_err(|reason| {
-                ProcessError::TensorFitFailed {
+    match shape.len() {
+        4 => {
+            let dwi = vol
+                .data
+                .into_dimensionality::<ndarray::Ix4>()
+                .map_err(|_| ProcessError::UnexpectedShape {
                     path: file.to_owned(),
-                    reason,
-                }
-            })?;
-
-        let mut fa_map = compute_scalar_map(&field, fractional_anisotropy);
-        gaussian_smooth_3d_anisotropic(&mut fa_map, args.sigma_fa, zooms);
-        save_scalar_map(&fa_map, file, "fa_processed", &vol.header)?;
-
-        if args.emit_md {
-            let mut md_map = compute_scalar_map(&field, mean_diffusivity);
-            gaussian_smooth_3d_anisotropic(&mut md_map, args.sigma_fa, zooms);
-            save_scalar_map(&md_map, file, "md_processed", &vol.header)?;
+                    ndim: shape.len(),
+                })?;
+            let b0 = dwi.index_axis(ndarray::Axis(3), 0).to_owned();
+            let mask = generate_otsu_mask(&b0, 256);
+            let gradients = load_gradients(file, shape[3])?;
+            process_4d(
+                dwi,
+                gradients,
+                args.bvalue,
+                mask,
+                zooms,
+                args.sigma_fa,
+                &vol.header,
+                file,
+                args.emit_md,
+                args.emit_ad,
+                args.emit_rd,
+            )?;
         }
-
-        if args.emit_ad {
-            let mut ad_map = compute_scalar_map(&field, axial_diffusivity);
-            gaussian_smooth_3d_anisotropic(&mut ad_map, args.sigma_fa, zooms);
-            save_scalar_map(&ad_map, file, "ad_processed", &vol.header)?;
+        3 => {
+            let struct_vol = vol
+                .data
+                .into_dimensionality::<ndarray::Ix3>()
+                .map_err(|_| ProcessError::UnexpectedShape {
+                    path: file.to_owned(),
+                    ndim: shape.len(),
+                })?;
+            process_3d(struct_vol, zooms, args.sigma_3d, &vol.header, file)?;
         }
-
-        if args.emit_rd {
-            let mut rd_map = compute_scalar_map(&field, radial_diffusivity);
-            gaussian_smooth_3d_anisotropic(&mut rd_map, args.sigma_fa, zooms);
-            save_scalar_map(&rd_map, file, "rd_processed", &vol.header)?;
-        }
-    } else if shape.len() == 3 {
-        let mut struct_vol = vol
-            .data
-            .into_dimensionality::<ndarray::Ix3>()
-            .map_err(|_| ProcessError::UnexpectedShape {
+        _ => {
+            return Err(ProcessError::UnexpectedShape {
                 path: file.to_owned(),
                 ndim: shape.len(),
-            })?;
-
-        let mask = generate_otsu_mask(&struct_vol, 256);
-        gaussian_smooth_3d_anisotropic(&mut struct_vol, args.sigma_3d, zooms);
-
-        struct_vol.zip_mut_with(&mask, |val, &m| {
-            if m == 0.0 {
-                *val = 0.0;
-            }
-        });
-
-        save_scalar_map(&struct_vol, file, "smoothed_processed", &vol.header)?;
-    } else {
-        return Err(ProcessError::UnexpectedShape {
-            path: file.to_owned(),
-            ndim: shape.len(),
-        });
+            });
+        }
     }
 
     let elapsed = start.elapsed();
