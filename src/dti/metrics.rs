@@ -69,13 +69,29 @@ pub fn compute_scalar_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array4;
+
+    const EPSILON: f32 = 1e-4;
+
+    #[inline]
+    fn assert_near(actual: f32, expected: f32) {
+        let abs_err = (actual - expected).abs();
+        let max_val = actual.abs().max(expected.abs());
+        let tol = EPSILON * max_val.max(1.0);
+        assert!(
+            abs_err <= tol,
+            "expected {expected}, got {actual} (diff: {abs_err}, tol: {tol})"
+        );
+    }
+
+    // --- Fractional Anisotropy (FA) ---
 
     #[test]
     fn isotropic_tensor_has_zero_fa() {
         let eig = TensorEigenDecomp {
             eigenvalues: [1.0, 1.0, 1.0],
         };
-        assert!(fractional_anisotropy(&eig).abs() < 1e-6);
+        assert_near(fractional_anisotropy(&eig), 0.0);
     }
 
     #[test]
@@ -83,14 +99,122 @@ mod tests {
         let eig = TensorEigenDecomp {
             eigenvalues: [1.0, 0.0, 0.0],
         };
-        assert!((fractional_anisotropy(&eig) - 1.0).abs() < 1e-6);
+        assert_near(fractional_anisotropy(&eig), 1.0);
     }
+
+    #[test]
+    fn zero_eigenvalues_fa_is_zero() {
+        // Tests denom <= 1e-6 guard
+        let eig = TensorEigenDecomp {
+            eigenvalues: [0.0, 0.0, 0.0],
+        };
+        assert_eq!(fractional_anisotropy(&eig), 0.0);
+    }
+
+    #[test]
+    fn planar_anisotropy_fa() {
+        // Oblate / planar tensor (l1 = l2 > l3)
+        // FA = sqrt(0.5) ≈ 0.7071068
+        let eig = TensorEigenDecomp {
+            eigenvalues: [1.0, 1.0, 0.0],
+        };
+        assert_near(fractional_anisotropy(&eig), (0.5f32).sqrt());
+    }
+
+    #[test]
+    fn fa_is_clamped_to_one() {
+        let eig = TensorEigenDecomp {
+            eigenvalues: [100.0, 0.0, 0.0],
+        };
+        assert!(fractional_anisotropy(&eig) <= 1.0);
+    }
+
+    // --- Mean Diffusivity (MD) ---
 
     #[test]
     fn mean_diffusivity_is_average_of_eigenvalues() {
         let eig = TensorEigenDecomp {
             eigenvalues: [3.0, 2.0, 1.0],
         };
-        assert_eq!(mean_diffusivity(&eig), 2.0);
+        assert_near(mean_diffusivity(&eig), 2.0);
+    }
+
+    #[test]
+    fn mean_diffusivity_zero_eigenvalues() {
+        let eig = TensorEigenDecomp {
+            eigenvalues: [0.0, 0.0, 0.0],
+        };
+        assert_near(mean_diffusivity(&eig), 0.0);
+    }
+
+    // --- Axial Diffusivity (AD) ---
+
+    #[test]
+    fn axial_diffusivity_returns_principal_eigenvalue() {
+        let eig = TensorEigenDecomp {
+            eigenvalues: [0.0020, 0.0005, 0.0002],
+        };
+        assert_near(axial_diffusivity(&eig), 0.0020);
+    }
+
+    // --- Radial Diffusivity (RD) ---
+
+    #[test]
+    fn radial_diffusivity_averages_secondary_eigenvalues() {
+        let eig = TensorEigenDecomp {
+            eigenvalues: [0.0020, 0.0006, 0.0004],
+        };
+        // (0.0006 + 0.0004) / 2 = 0.0005
+        assert_near(radial_diffusivity(&eig), 0.0005);
+    }
+
+    // --- Volume Mapping (compute_scalar_map) ---
+
+    #[test]
+    fn compute_scalar_map_evaluates_fitted_voxels_and_skips_zero_tensors() {
+        let (nx, ny, nz) = (2, 2, 1);
+        let mut field = TensorField::zeros((nx, ny, nz, 6));
+
+        // Voxel (0,0,0): Prolate anisotropic tensor
+        // Dxx=0.002, Dyy=0.0005, Dzz=0.0005 -> Eigs: [0.002, 0.0005, 0.0005]
+        field[[0, 0, 0, 0]] = 0.002;
+        field[[0, 0, 0, 1]] = 0.0005;
+        field[[0, 0, 0, 2]] = 0.0005;
+
+        // Voxel (1,0,0): Isotropic tensor
+        // Dxx=0.001, Dyy=0.001, Dzz=0.001 -> Eigs: [0.001, 0.001, 0.001]
+        field[[1, 0, 0, 0]] = 0.001;
+        field[[1, 0, 0, 1]] = 0.001;
+        field[[1, 0, 0, 2]] = 0.001;
+
+        // Voxels (0,1,0) and (1,1,0) remain all zeros (unfit/masked)
+
+        let fa_map = compute_scalar_map(&field, fractional_anisotropy);
+        let md_map = compute_scalar_map(&field, mean_diffusivity);
+        let ad_map = compute_scalar_map(&field, axial_diffusivity);
+        let rd_map = compute_scalar_map(&field, radial_diffusivity);
+
+        // Verify shape matches volume space (nx, ny, nz)
+        assert_eq!(fa_map.shape(), &[2, 2, 1]);
+
+        // Masked/unfit voxels stay 0.0
+        assert_eq!(fa_map[[0, 1, 0]], 0.0);
+        assert_eq!(fa_map[[1, 1, 0]], 0.0);
+        assert_eq!(md_map[[0, 1, 0]], 0.0);
+
+        // Voxel (0,0,0) metrics
+        let expected_fa_000 = fractional_anisotropy(&TensorEigenDecomp {
+            eigenvalues: [0.002, 0.0005, 0.0005],
+        });
+        assert_near(fa_map[[0, 0, 0]], expected_fa_000);
+        assert_near(md_map[[0, 0, 0]], 0.001);
+        assert_near(ad_map[[0, 0, 0]], 0.002);
+        assert_near(rd_map[[0, 0, 0]], 0.0005);
+
+        // Voxel (1,0,0) metrics (Isotropic)
+        assert_near(fa_map[[1, 0, 0]], 0.0);
+        assert_near(md_map[[1, 0, 0]], 0.001);
+        assert_near(ad_map[[1, 0, 0]], 0.001);
+        assert_near(rd_map[[1, 0, 0]], 0.001);
     }
 }
