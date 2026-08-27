@@ -303,3 +303,166 @@ fn main() {
         all_elapsed.as_secs_f32()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    // --- get_processed_output_path tests ---
+
+    #[test]
+    fn test_get_processed_output_path_strips_extensions() {
+        let p_gz = Path::new("/data/subject01_dwi.nii.gz");
+        let out_fa = get_processed_output_path(p_gz, "fa_processed");
+        assert_eq!(
+            out_fa,
+            PathBuf::from("/data/subject01_dwi_fa_processed.nii.gz")
+        );
+
+        let p_nii = Path::new("/data/subject01_t1.nii");
+        let out_smooth = get_processed_output_path(p_nii, "smoothed_processed");
+        assert_eq!(
+            out_smooth,
+            PathBuf::from("/data/subject01_t1_smoothed_processed.nii.gz")
+        );
+    }
+
+    // --- find_nii_gz_files tests ---
+
+    #[test]
+    fn test_find_nii_gz_files_recurses_and_filters_outputs() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let sub_dir = dir.path().join("sub-01");
+        fs::create_dir(&sub_dir)?;
+
+        // Valid raw scans
+        let scan1 = dir.path().join("raw1.nii.gz");
+        let scan2 = sub_dir.join("dwi.nii.gz");
+        // Output file to skip
+        let processed = sub_dir.join("dwi_fa_processed.nii.gz");
+        // Non-NIfTI file
+        let txt_file = dir.path().join("notes.txt");
+
+        File::create(&scan1)?;
+        File::create(&scan2)?;
+        File::create(&processed)?;
+        File::create(&txt_file)?;
+
+        let mut found = find_nii_gz_files(dir.path());
+        found.sort();
+
+        let mut expected = vec![scan1, scan2];
+        expected.sort();
+
+        assert_eq!(found, expected);
+        Ok(())
+    }
+
+    // --- load_gradients tests ---
+
+    #[test]
+    fn test_load_gradients_from_valid_bvec_file() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let nifti_path = dir.path().join("dwi.nii.gz");
+        let bvec_path = dir.path().join("dwi.bvec");
+
+        File::create(&nifti_path)?;
+        let mut f = File::create(&bvec_path)?;
+        // Write 3x3 matrix (3 diffusion directions)
+        writeln!(f, "1.0  0.0  0.70710677")?;
+        writeln!(f, "0.0  1.0  0.0")?;
+        writeln!(f, "0.0  0.0  0.70710677")?;
+
+        let grads = load_gradients(&nifti_path, 3).unwrap();
+        assert_eq!(grads.len(), 3);
+        assert_eq!(grads[0], [1.0, 0.0, 0.0]);
+        assert_eq!(grads[1], [0.0, 1.0, 0.0]);
+        assert_eq!(
+            grads[2],
+            [f32::consts::FRAC_1_SQRT_2, 0.0, f32::consts::FRAC_1_SQRT_2]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_gradients_fallback_when_bvec_missing() {
+        let dir = tempdir().unwrap();
+        let nifti_path = dir.path().join("dwi_nobvec.nii.gz");
+
+        let grads = load_gradients(&nifti_path, 4).unwrap();
+        assert_eq!(grads.len(), 4);
+
+        // First gradient direction must be baseline b=0 [0, 0, 0]
+        assert_eq!(grads[0], [0.0, 0.0, 0.0]);
+
+        // Synthetic directions must be normalized / distinct non-zero vectors
+        for g in &grads[1..] {
+            let norm = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            assert!(norm > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_load_gradients_fallback_on_dimension_mismatch() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let nifti_path = dir.path().join("dwi.nii.gz");
+        let bvec_path = dir.path().join("dwi.bvec");
+
+        File::create(&nifti_path)?;
+        let mut f = File::create(&bvec_path)?;
+        // 2 directions in bvec file, but 3 expected
+        writeln!(f, "1.0 0.0")?;
+        writeln!(f, "0.0 1.0")?;
+        writeln!(f, "0.0 0.0")?;
+
+        let grads = load_gradients(&nifti_path, 3).unwrap();
+        assert_eq!(grads.len(), 3);
+        // Fallback synthetic baseline triggers due to count mismatch
+        assert_eq!(grads[0], [0.0, 0.0, 0.0]);
+
+        Ok(())
+    }
+
+    // --- CLI argument parsing tests ---
+
+    #[test]
+    fn test_cli_defaults() {
+        let args = Cli::try_parse_from(["dti_pipeline", "/path/to/data"]).unwrap();
+        assert_eq!(args.root, "/path/to/data");
+        assert_eq!(args.sigma_3d, 1.5);
+        assert_eq!(args.sigma_fa, 1.0);
+        assert_eq!(args.bvalue, 1000.0);
+        assert!(!args.emit_md);
+        assert!(!args.emit_ad);
+        assert!(!args.emit_rd);
+    }
+
+    #[test]
+    fn test_cli_custom_flags() {
+        let args = Cli::try_parse_from([
+            "dti_pipeline",
+            "/path/to/data",
+            "-s",
+            "2.5",
+            "--sigma-fa",
+            "0.8",
+            "-b",
+            "1500.0",
+            "--emit-md",
+            "--emit-rd",
+        ])
+        .unwrap();
+
+        assert_eq!(args.sigma_3d, 2.5);
+        assert_eq!(args.sigma_fa, 0.8);
+        assert_eq!(args.bvalue, 1500.0);
+        assert!(args.emit_md);
+        assert!(!args.emit_ad);
+        assert!(args.emit_rd);
+    }
+}
