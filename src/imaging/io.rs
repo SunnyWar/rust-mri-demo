@@ -71,17 +71,77 @@ pub fn load_gradients(nifti_path: &Path, n_dirs: usize) -> Result<Vec<[f32; 3]>,
         }
     }
 
-    // Fallback synthetic gradient directions
-    let mut gradients = Vec::with_capacity(n_dirs);
-    gradients.push([0.0, 0.0, 0.0]); // baseline S0
+    // Fallback: synthetic, well-distributed gradient directions
+    Ok(electrostatic_gradients(n_dirs))
+}
 
-    for i in 1..n_dirs {
-        let theta = i as f32 * 0.5;
-        let phi = i as f32 * 0.3;
-        gradients.push([theta.cos() * phi.sin(), theta.sin() * phi.sin(), phi.cos()]);
+pub fn electrostatic_gradients(n_dirs: usize) -> Vec<[f32; 3]> {
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    if n_dirs == 0 {
+        return Vec::new();
     }
 
-    Ok(gradients)
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+
+    let mut points = Vec::with_capacity(n_dirs);
+    points.push([0.0, 0.0, 0.0]); // S0 baseline
+
+    // rand 0.10: use random::<f32>() instead of gen_range
+    for _ in 1..n_dirs {
+        let z: f32 = rng.random::<f32>() * 2.0 - 1.0; // [-1, 1]
+        let t: f32 = rng.random::<f32>() * std::f32::consts::TAU; // [0, 2π]
+        let r = (1.0 - z * z).sqrt();
+        points.push([r * t.cos(), r * t.sin(), z]);
+    }
+
+    let iterations = 200;
+    let step0 = 0.05;
+
+    for iter in 0..iterations {
+        let step = step0 * (1.0 - (iter as f32 / iterations as f32));
+        let mut forces = vec![[0.0f32; 3]; n_dirs];
+
+        for i in 1..n_dirs {
+            for j in 1..n_dirs {
+                if i == j {
+                    continue;
+                }
+
+                let dx = points[i][0] - points[j][0];
+                let dy = points[i][1] - points[j][1];
+                let dz = points[i][2] - points[j][2];
+                let dist2 = dx * dx + dy * dy + dz * dz + 1e-6;
+                // Coulomb force ~ 1/r^2 along the unit vector => dx/r^3
+                let inv3 = 1.0 / (dist2 * dist2.sqrt());
+
+                forces[i][0] += dx * inv3;
+                forces[i][1] += dy * inv3;
+                forces[i][2] += dz * inv3;
+            }
+        }
+
+        for i in 1..n_dirs {
+            points[i][0] += step * forces[i][0];
+            points[i][1] += step * forces[i][1];
+            points[i][2] += step * forces[i][2];
+
+            let norm = (points[i][0] * points[i][0]
+                + points[i][1] * points[i][1]
+                + points[i][2] * points[i][2])
+                .sqrt();
+
+            if norm > 1e-12 {
+                points[i][0] /= norm;
+                points[i][1] /= norm;
+                points[i][2] /= norm;
+            }
+        }
+    }
+
+    points
 }
 
 pub fn get_processed_output_path(file: &Path, suffix: &str) -> PathBuf {
