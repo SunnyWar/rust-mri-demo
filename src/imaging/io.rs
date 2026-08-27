@@ -84,8 +84,9 @@ pub fn load_gradients(nifti_path: &Path, n_dirs: usize) -> Result<Vec<[f32; 3]>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::fs::File;
+    use std::io::Write;
+    use std::{f32, fs};
     use tempfile::tempdir;
 
     #[test]
@@ -114,6 +115,72 @@ mod tests {
         expected.sort();
 
         assert_eq!(found, expected);
+        Ok(())
+    }
+
+    // --- load_gradients tests ---
+
+    #[test]
+    fn test_load_gradients_from_valid_bvec_file() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let nifti_path = dir.path().join("dwi.nii.gz");
+        let bvec_path = dir.path().join("dwi.bvec");
+
+        File::create(&nifti_path)?;
+        let mut f = File::create(&bvec_path)?;
+        // Write 3x3 matrix (3 diffusion directions)
+        writeln!(f, "1.0  0.0  0.70710677")?;
+        writeln!(f, "0.0  1.0  0.0")?;
+        writeln!(f, "0.0  0.0  0.70710677")?;
+
+        let grads = load_gradients(&nifti_path, 3).unwrap();
+        assert_eq!(grads.len(), 3);
+        assert_eq!(grads[0], [1.0, 0.0, 0.0]);
+        assert_eq!(grads[1], [0.0, 1.0, 0.0]);
+        assert_eq!(
+            grads[2],
+            [f32::consts::FRAC_1_SQRT_2, 0.0, f32::consts::FRAC_1_SQRT_2]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_gradients_fallback_when_bvec_missing() {
+        let dir = tempdir().unwrap();
+        let nifti_path = dir.path().join("dwi_nobvec.nii.gz");
+
+        let grads = load_gradients(&nifti_path, 4).unwrap();
+        assert_eq!(grads.len(), 4);
+
+        // First gradient direction must be baseline b=0 [0, 0, 0]
+        assert_eq!(grads[0], [0.0, 0.0, 0.0]);
+
+        // Synthetic directions must be normalized / distinct non-zero vectors
+        for g in &grads[1..] {
+            let norm = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            assert!(norm > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_load_gradients_fallback_on_dimension_mismatch() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let nifti_path = dir.path().join("dwi.nii.gz");
+        let bvec_path = dir.path().join("dwi.bvec");
+
+        File::create(&nifti_path)?;
+        let mut f = File::create(&bvec_path)?;
+        // 2 directions in bvec file, but 3 expected
+        writeln!(f, "1.0 0.0")?;
+        writeln!(f, "0.0 1.0")?;
+        writeln!(f, "0.0 0.0")?;
+
+        let grads = load_gradients(&nifti_path, 3).unwrap();
+        assert_eq!(grads.len(), 3);
+        // Fallback synthetic baseline triggers due to count mismatch
+        assert_eq!(grads[0], [0.0, 0.0, 0.0]);
+
         Ok(())
     }
 }
