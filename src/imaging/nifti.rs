@@ -1,8 +1,7 @@
 use flate2::read::GzDecoder;
 use ndarray::ArrayD;
 use nifti::{
-    InMemNiftiObject, IntoNdArray, NiftiHeader, NiftiObject, ReaderOptions, writer::WriterOptions,
-};
+    InMemNiftiObject, IntoNdArray, NiftiHeader, NiftiObject, ReaderOptions};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -40,15 +39,4 @@ pub fn load_nifti(path: &str) -> Result<Volume, ProcessError> {
         .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?;
 
     Ok(Volume { data, header })
-}
-
-pub fn save_nifti(vol: &Volume, path: &str) -> Result<(), ProcessError> {
-    let file_path = Path::new(path);
-
-    WriterOptions::new(file_path)
-        .reference_header(&vol.header)
-        .write_nifti(&vol.data)
-        .map_err(|e| ProcessError::Io(std::io::Error::other(e)))?;
-
-    Ok(())
 }

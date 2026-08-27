@@ -189,7 +189,7 @@ mod tests {
         let bin = otsu_threshold_bin(&hist, total_pixels);
 
         // Optimal threshold boundary must fall between the two peaks
-        assert!(bin >= 3 && bin <= 6);
+        assert!((3..=6).contains(&bin));
     }
 
     #[test]
